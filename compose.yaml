@@ -1,0 +1,29 @@
+services:
+  virtizai:
+    build:
+      context: .
+      args:
+        VIRTIZAI_VERSION: "0.1.0"
+    image: virtizai:0.1.0
+    container_name: virtizai
+    restart: unless-stopped
+    ports:
+      - "8766:8766"
+    environment:
+      VIRTIZAI_DATA_DIR: /data
+      VIRTIZAI_WORKSPACE_DIR: /workspace
+      VIRTIZAI_LOG_DIR: /var/log/virtizai
+    volumes:
+      - virtizai-data:/data
+      - virtizai-workspace:/workspace
+      - virtizai-logs:/var/log/virtizai
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  virtizai-data:
+  virtizai-workspace:
+  virtizai-logs:

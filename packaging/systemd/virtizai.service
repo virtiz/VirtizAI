@@ -1,0 +1,25 @@
+[Unit]
+Description=VirtizAI self-hosted AI orchestration core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=virtizai
+Group=virtizai
+WorkingDirectory=/usr/lib/virtizai
+EnvironmentFile=-/etc/virtizai/virtizai.env
+Environment=VIRTIZAI_DATA_DIR=/var/lib/virtizai
+Environment=VIRTIZAI_WORKSPACE_DIR=/var/lib/virtizai/workspace
+Environment=VIRTIZAI_LOG_DIR=/var/log/virtizai
+ExecStart=/usr/lib/virtizai/venv/bin/uvicorn virtizai_core.main:app --host ${VIRTIZAI_HOST:-127.0.0.1} --port ${VIRTIZAI_PORT:-8766}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/virtizai /var/log/virtizai
+
+[Install]
+WantedBy=multi-user.target

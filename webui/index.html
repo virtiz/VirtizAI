@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f0e8">
+  <title>VirtizAI</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div id="app-shell" class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <div class="brand"><span class="brand-mark">V</span><span>VirtizAI</span><span class="build-tag">CORE 0.1</span></div>
+      <div class="workspace-switcher"><span class="status-dot healthy"></span><span>Local workspace</span><span class="chevron">⌄</span></div>
+      <nav id="primary-nav" class="nav-list"></nav>
+      <div class="sidebar-bottom">
+        <div class="mini-health"><span class="status-dot healthy"></span><div><strong>Core online</strong><small>SQLite / WAL</small></div></div>
+        <button class="icon-button" data-action="open-settings" aria-label="Open settings" title="Settings">⚙</button>
+      </div>
+    </aside>
+
+    <main class="main-column">
+      <header class="topbar">
+        <div class="mobile-brand"><span class="brand-mark">V</span><strong>VirtizAI</strong></div>
+        <div class="breadcrumb"><span id="view-kicker">Workspace</span><span class="slash">/</span><strong id="view-title">Chat</strong></div>
+        <div class="top-actions"><button class="quiet-button" data-action="open-wizard">Setup <span>↗</span></button><button class="avatar">C</button></div>
+      </header>
+      <section id="view-content" class="view-content"></section>
+    </main>
+
+    <aside class="inspector" id="inspector">
+      <div class="inspector-head"><span>Today</span><span class="live-chip"><span class="status-dot healthy"></span>Live</span></div>
+      <div class="metric-block"><span class="metric-label">Secretary latency</span><strong>No data</strong><small>Waiting for measured responses</small></div>
+      <div class="metric-block"><span class="metric-label">Jobs recorded</span><strong>00</strong><small>0 running · 0 queued</small></div>
+      <div class="inspector-section"><div class="section-label">Quick routes</div><button class="route-mini"><span class="route-icon coral">S</span><span><strong>Secretary</strong><small>Latency optimized</small></span><span class="status-dot healthy"></span></button><button class="route-mini"><span class="route-icon blue">C</span><span><strong>Coding</strong><small>Capability first</small></span><span class="status-dot unknown"></span></button></div>
+      <div class="inspector-section recent"><div class="section-label">Recent activity</div><div class="activity-line"><div><strong>No activity yet</strong><small>Live execution events appear here</small></div></div></div>
+      <button class="full-button" data-action="open-settings">Open settings <span>→</span></button>
+    </aside>
+  </div>
+
+  <div id="wizard" class="modal-layer hidden" aria-hidden="true">
+    <div class="wizard-modal">
+      <aside class="wizard-rail"><div class="wizard-logo"><span class="brand-mark">V</span><strong>VirtizAI</strong></div><div class="wizard-title"><span class="eyebrow">FIRST RUN</span><h2>Make it yours.</h2><p>Configure the core once. Everything stays local until you decide otherwise.</p></div><div id="wizard-steps" class="wizard-steps"></div><div class="wizard-foot"><span class="status-dot healthy"></span> Core ready · schema v2</div></aside>
+      <section class="wizard-body"><div class="wizard-top"><span id="wizard-count">Step 1 of 11</span><button class="close-button" data-action="close-wizard" aria-label="Close setup">×</button></div><div id="wizard-content" class="wizard-content"></div><div class="wizard-actions"><button class="quiet-button" data-action="wizard-back">Back</button><button class="primary-button" data-action="wizard-next">Continue <span>→</span></button></div></section>
+    </div>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

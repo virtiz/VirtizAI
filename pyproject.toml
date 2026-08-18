@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "virtizai-core"
+dynamic = ["version"]
+description = "Independent self-hosted AI orchestration core"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+test = [
+  "httpx>=0.27,<1",
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.24,<1",
+]
+
+[tool.setuptools.packages.find]
+include = ["virtizai_core*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "virtizai_core.version.__version__"}
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

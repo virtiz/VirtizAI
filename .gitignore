@@ -1,0 +1,33 @@
+# Runtime state and generated work
+/data/
+/workspace/
+/logs/
+/dist/
+/build/
+
+# Local environments and tooling
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/

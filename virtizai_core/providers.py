@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+import json
+import uuid
+from typing import Any
+
+from .adapters import DiscoveredModel, InferenceResponse, MockProviderAdapter, OllamaAdapter, ProviderAdapter
+from .db import Database
+
+
+class ProviderRegistry:
+    def __init__(self, database: Database) -> None:
+        self.database = database
+        self.adapters: dict[str, ProviderAdapter] = {}
+
+    def register_adapter(self, provider_id: str, adapter: ProviderAdapter) -> None:
+        self.adapters[provider_id] = adapter
+
+    def restore_adapters(self) -> None:
+        """Rehydrate configured adapter types without copying provider secrets."""
+        for provider in self.database.fetch_all("SELECT * FROM providers"):
+            if provider["adapter_type"] == "ollama":
+                config = json.loads(provider["config_json"] or "{}")
+                self.register_adapter(provider["id"], self._adapter("ollama", provider["endpoint"], config))
+            elif provider["adapter_type"] == "mock":
+                models = [row["name"] for row in self.database.fetch_all("SELECT name FROM models WHERE provider_id = ?", (provider["id"],))]
+                self.register_adapter(provider["id"], MockProviderAdapter(models, response_prefix=provider["name"]))
+
+    def create_provider(self, name: str, adapter_type: str, endpoint: str | None, config: dict[str, Any] | None = None, adapter: ProviderAdapter | None = None) -> str:
+        existing = self.database.fetch_one(
+            "SELECT id FROM providers WHERE name = ? AND adapter_type = ? AND COALESCE(endpoint, '') = COALESCE(?, '')",
+            (name.strip(), adapter_type, endpoint),
+        )
+        if existing:
+            provider_id = existing["id"]
+            if provider_id not in self.adapters:
+                self.restore_adapters()
+            return provider_id
+        provider_id = str(uuid.uuid4())
+        self.database.execute(
+            "INSERT INTO providers(id, name, adapter_type, endpoint, config_json) VALUES (?, ?, ?, ?, ?)",
+            (provider_id, name, adapter_type, endpoint, json.dumps(config or {})),
+        )
+        self.register_adapter(provider_id, adapter or self._adapter(adapter_type, endpoint, config or {}))
+        return provider_id
+
+    def delete_provider(self, provider_id: str) -> None:
+        self.database.execute("DELETE FROM route_targets WHERE provider_id = ?", (provider_id,))
+        self.database.execute("DELETE FROM models WHERE provider_id = ?", (provider_id,))
+        self.database.execute("DELETE FROM providers WHERE id = ?", (provider_id,))
+        self.adapters.pop(provider_id, None)
+
+    def _adapter(self, adapter_type: str, endpoint: str | None, config: dict[str, Any]) -> ProviderAdapter:
+        if adapter_type == "ollama":
+            if not endpoint:
+                raise ValueError("Ollama providers require an endpoint")
+            return OllamaAdapter(endpoint, float(config.get("timeout_seconds", 20)))
+        raise ValueError(f"Unsupported adapter type: {adapter_type}")
+
+    def adapter_for(self, provider_id: str) -> ProviderAdapter:
+        adapter = self.adapters.get(provider_id)
+        if adapter is None:
+            raise LookupError(f"No adapter registered for provider: {provider_id}")
+        return adapter
+
+    async def discover_models(self, provider_id: str) -> list[str]:
+        discovered = await self.adapter_for(provider_id).list_models()
+        for model in discovered:
+            self._upsert_model(provider_id, model)
+        return [model.name for model in discovered]
+
+    async def health(self, provider_id: str):
+        return await self.adapter_for(provider_id).health()
+
+    async def chat(self, provider_id: str, model_name: str, messages: list[dict[str, str]], max_tokens: int | None = None) -> InferenceResponse:
+        return await self.adapter_for(provider_id).chat(messages, model_name, max_tokens)
+
+    def _upsert_model(self, provider_id: str, model: DiscoveredModel) -> str:
+        row = self.database.fetch_one("SELECT id FROM models WHERE provider_id = ? AND name = ?", (provider_id, model.name))
+        model_id = row["id"] if row else str(uuid.uuid4())
+        values = (model.state, model.context_limit, json.dumps(model.capabilities), json.dumps(model.metadata), model_id)
+        if row:
+            self.database.execute(
+                "UPDATE models SET status = ?, context_window = ?, capabilities_json = ?, metadata_json = ?, last_seen_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                values,
+            )
+        else:
+            self.database.execute(
+                "INSERT INTO models(id, provider_id, name, capabilities_json, status, context_window, metadata_json, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (model_id, provider_id, model.name, json.dumps(model.capabilities), model.state, model.context_limit, json.dumps(model.metadata)),
+            )
+        return model_id
+
+    def set_model_override(self, model_id: str, overrides: dict[str, Any]) -> None:
+        self.database.execute("UPDATE models SET user_overrides_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (json.dumps(overrides), model_id))
+
+    def list_providers(self) -> list[dict]:
+        return [dict(row) for row in self.database.fetch_all("SELECT * FROM providers ORDER BY name")]
+
+    def list_models(self) -> list[dict]:
+        return [dict(row) for row in self.database.fetch_all("SELECT m.*, p.name AS provider_name FROM models m JOIN providers p ON p.id = m.provider_id ORDER BY p.name, m.name")]
+
+    def install_mock_provider(self, name: str, models: list[str], fail: bool = False, delay_ms: float = 0) -> str:
+        return self.create_provider(name, "mock", None, adapter=MockProviderAdapter(models, response_prefix=name, fail=fail, delay_ms=delay_ms))

@@ -1,0 +1,12 @@
+.git
+.pytest_cache
+__pycache__
+*.pyc
+data
+logs
+workspace
+.venv
+*.egg-info
+tests
+bench.py
+VIRTIZAI_PHASE_*.md
