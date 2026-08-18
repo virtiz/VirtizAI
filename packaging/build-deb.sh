@@ -10,6 +10,10 @@ mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/virtizai" "$PKG/etc/virtizai" "$PKG/var/lib
 cp "$ROOT/pyproject.toml" "$ROOT/requirements-runtime.txt" "$ROOT/README.md" "$ROOT/virtizai_cli.py" "$PKG/usr/lib/virtizai/"
 cp -R "$ROOT/virtizai_core" "$ROOT/webui" "$PKG/usr/lib/virtizai/"
 find "$PKG/usr/lib/virtizai" -type d -name __pycache__ -prune -exec rm -rf {} +
+cat > "$PKG/etc/virtizai/virtizai.env" <<'EOF'
+VIRTIZAI_HOST=127.0.0.1
+VIRTIZAI_PORT=8766
+EOF
 cp "$ROOT/packaging/systemd/virtizai.service" "$PKG/libvirtizai.service.tmp"
 mkdir -p "$PKG/lib/systemd/system"
 mv "$PKG/libvirtizai.service.tmp" "$PKG/lib/systemd/system/virtizai.service"
