@@ -63,7 +63,7 @@ install)
     case "$artifact" in "$DATA_DIR"/staging/*.deb) ;; *) exit 64;; esac
     actual=$(sha256sum "$artifact" | awk '{print $1}')
     [ "$actual" = "$expected" ] || { echo '{"error":"checksum_mismatch"}' >&2; exit 65; }
-    VIRTIZAI_MANAGED_UPDATE=1 DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades "$artifact"
+    VIRTIZAI_MANAGED_UPDATE=1 DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=--force-confold --allow-downgrades "$artifact"
     systemd-run --unit=virtizai-update-restart-$$ --on-active=2s /bin/systemctl restart virtizai.service >/dev/null
     printf '{"installed":true,"restart_scheduled":true}\n'
     ;;
@@ -79,7 +79,7 @@ rollback)
     install -m 600 "$database" "$DATA_DIR/virtizai.db"; rm -f "$DATA_DIR/virtizai.db-wal" "$DATA_DIR/virtizai.db-shm"
     if [ -d "$temporary/etc/virtizai" ]; then cp -a "$temporary/etc/virtizai/." "$CONFIG_DIR/"; fi
     actual=$(sha256sum "$artifact" | awk '{print $1}'); [ "$actual" = "$expected_artifact" ] || exit 65
-    VIRTIZAI_MANAGED_UPDATE=1 DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades "$artifact"
+    VIRTIZAI_MANAGED_UPDATE=1 DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=--force-confold --allow-downgrades "$artifact"
     python3 - "$journal" "$transaction_id" <<'PY'
 import json, os, sys
 p, tx = sys.argv[1:]; d=json.load(open(p)); d["stage"]="RESTART_PENDING"; d["helper_result"]={"transaction_id":tx,"success":True}; t=p+".tmp"; open(t,"w").write(json.dumps(d,sort_keys=True)+"\n"); os.replace(t,p)

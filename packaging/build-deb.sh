@@ -22,7 +22,7 @@ VIRTIZAI_PORT=8766
 VIRTIZAI_UPDATE_HELPER=sudo /usr/libexec/virtizai-update-runner
 EOF
 if [ -n "${VIRTIZAI_SCHEMA_CEILING:-}" ]; then printf 'VIRTIZAI_SCHEMA_CEILING=%s\n' "$VIRTIZAI_SCHEMA_CEILING" >> "$PKG/etc/virtizai/virtizai.env"; fi
-printf '/etc/virtizai/virtizai.env\n' > "$PKG/DEBIAN/conffiles"
+rm -f "$PKG/etc/virtizai/virtizai.env"
 cp "$ROOT/packaging/systemd/virtizai.service" "$PKG/libvirtizai.service.tmp"
 mkdir -p "$PKG/lib/systemd/system"
 mv "$PKG/libvirtizai.service.tmp" "$PKG/lib/systemd/system/virtizai.service"
@@ -44,6 +44,13 @@ if ! id virtizai >/dev/null 2>&1; then useradd --system --home-dir /var/lib/virt
 python3 -m venv /usr/lib/virtizai/venv
 /usr/lib/virtizai/venv/bin/pip install --no-cache-dir -r /usr/lib/virtizai/requirements-runtime.txt
 chown -R virtizai:virtizai /var/lib/virtizai /var/log/virtizai /etc/virtizai
+if [ ! -f /etc/virtizai/virtizai.env ]; then
+cat > /etc/virtizai/virtizai.env <<'ENVEOF'
+VIRTIZAI_HOST=127.0.0.1
+VIRTIZAI_PORT=8766
+VIRTIZAI_UPDATE_HELPER=sudo /usr/libexec/virtizai-update-runner
+ENVEOF
+fi
 systemctl daemon-reload
 systemctl enable virtizai.service
 if [ "${VIRTIZAI_MANAGED_UPDATE:-0}" != "1" ]; then systemctl restart virtizai.service || true; fi
