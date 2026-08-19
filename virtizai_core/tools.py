@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,7 +54,7 @@ class ToolRegistryService:
     async def run(self, job_id: str, tool_name: str, args: dict, profile: str = "secretary") -> ExecutionResult:
         tool = self.authorize(tool_name, profile)
         if tool_name == "host_status":
-            argv = ["/bin/sh", "-c", "printf 'status=ok\\n'; uname -srm"]
+            argv = [sys.executable, "-c", "import platform; print(\"status=ok\"); print(platform.uname().system, platform.uname().release, platform.uname().machine)"]
         elif tool_name == "file_read":
             path = args.get("path", "")
             if path.startswith("/") or ".." in path.split("/"):
