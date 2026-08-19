@@ -243,8 +243,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     # above; only an unexplained version transition is recorded as external.
     known = database.fetch_one("SELECT version FROM update_history WHERE status='known_good' ORDER BY rowid DESC LIMIT 1")
     pending = database.fetch_one("SELECT id FROM update_history WHERE version=? AND status='installed_pending_health'", (app_config.app_version,))
+    failed = database.fetch_one("SELECT id FROM update_history WHERE version=? AND status='failed'", (app_config.app_version,))
     source = os.environ.get("VIRTIZAI_UPDATE_SOURCE") or ("docker_compose" if Path("/.dockerenv").exists() else "native_package")
-    if known and known["version"] != app_config.app_version and pending is None:
+    if known and known["version"] != app_config.app_version and pending is None and failed is None:
         already = database.fetch_one(
             "SELECT id FROM update_history WHERE action='external_update' AND version=? AND release_ref=?",
             (app_config.app_version, source),
@@ -416,9 +417,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 return JSONResponse(status_code=202, content={"id": update_id, "status": "accepted", "transaction": transaction})
             else:
                 backup = coordinator.backup(update_id, app_config.app_version, request.target_version, schema)
+                if request.target_schema is not None:
+                    backup["target_schema"] = request.target_schema
                 result = {}
             result = {**result, **coordinator.helper.run("install", str(artifact), request.sha256)}
-            database.execute("UPDATE update_history SET status='installed_pending_health', metadata_json=? WHERE id=?", (json.dumps({"backup": backup, "helper": result, "data_restore_required": request.restore_data}), update_id))
+            database.execute("UPDATE update_history SET status='installed_pending_health', metadata_json=? WHERE id=?", (json.dumps({"backup": backup, "helper": result, "data_restore_required": request.restore_data, "target_schema": request.target_schema}), update_id))
             return {"id": update_id, "status": "installed_pending_health", "backup": backup}
         except (UpdateFailure, OSError) as exc:
             code = exc.code if isinstance(exc, UpdateFailure) else "update_io_failed"

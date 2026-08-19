@@ -155,7 +155,8 @@ class StartupUpdateReconciler:
         for row in rows:
             metadata = json.loads(row["metadata_json"] or "{}")
             backup = metadata.get("backup", {})
-            if not backup.get("verified") or backup.get("schema_version") != schema_version:
+            expected_schema = metadata.get("target_schema", backup.get("schema_version"))
+            if not backup.get("verified") or expected_schema != schema_version:
                 self.database.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps({**metadata, "code": "startup_reconciliation_failed", "failure_stage": "startup_reconciliation"}), row["id"]))
                 continue
             if health_status != "healthy":
