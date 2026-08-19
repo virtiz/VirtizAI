@@ -1,0 +1,5 @@
+#!/bin/sh
+# Root-owned fixed runner for the constrained helper outside the core sandbox.
+set -eu
+case "${1:-}" in backup|restore|install) ;; *) exit 64;; esac
+exec systemd-run --wait --collect --quiet --service-type=exec /usr/libexec/virtizai-update-helper "$@"

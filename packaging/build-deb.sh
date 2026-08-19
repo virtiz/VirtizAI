@@ -11,14 +11,15 @@ cp "$ROOT/pyproject.toml" "$ROOT/requirements-runtime.txt" "$ROOT/README.md" "$R
 cp -R "$ROOT/virtizai_core" "$ROOT/webui" "$PKG/usr/lib/virtizai/"
 find "$PKG/usr/lib/virtizai" -type d -name __pycache__ -prune -exec rm -rf {} +
 install -m 755 "$ROOT/packaging/virtizai-update-helper" "$PKG/usr/libexec/virtizai-update-helper"
+install -m 755 "$ROOT/packaging/virtizai-update-runner" "$PKG/usr/libexec/virtizai-update-runner"
 cat > "$PKG/etc/sudoers.d/virtizai-update" <<'EOF'
-virtizai ALL=(root) NOPASSWD: /usr/libexec/virtizai-update-helper *
+virtizai ALL=(root) NOPASSWD: /usr/libexec/virtizai-update-runner *
 EOF
 chmod 440 "$PKG/etc/sudoers.d/virtizai-update"
 cat > "$PKG/etc/virtizai/virtizai.env" <<'EOF'
 VIRTIZAI_HOST=127.0.0.1
 VIRTIZAI_PORT=8766
-VIRTIZAI_UPDATE_HELPER=sudo /usr/libexec/virtizai-update-helper
+VIRTIZAI_UPDATE_HELPER=sudo /usr/libexec/virtizai-update-runner
 EOF
 cp "$ROOT/packaging/systemd/virtizai.service" "$PKG/libvirtizai.service.tmp"
 mkdir -p "$PKG/lib/systemd/system"
