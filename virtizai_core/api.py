@@ -195,6 +195,7 @@ class NativeUpdateRequest(BaseModel):
     backup_ref: str | None = None
     backup_sha256: str | None = None
     restore_data: bool = False
+    target_schema: int | None = None
 
 
 class ExternalUpdateRecord(BaseModel):
@@ -345,6 +346,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 raise UpdateFailure("artifact_path_denied", "Artifacts must be staged under the VirtizAI data directory")
             coordinator.verify_artifact(artifact, request.sha256)
             schema = database.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")["version"]
+            if operation == "rollback" and request.target_schema is not None and request.target_schema < schema and not request.restore_data:
+                raise UpdateFailure("data_restore_required", "Application-only rollback is unsafe for an older schema")
             if operation == "rollback" and request.restore_data:
                 result = coordinator.helper.run("restore", request.backup_ref, request.backup_sha256)
                 backup = {"backup_ref": request.backup_ref, "checksum_sha256": request.backup_sha256, "verified": True, "restored": True, "schema_version": schema}
@@ -352,7 +355,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 backup = coordinator.backup(update_id, app_config.app_version, request.target_version, schema)
                 result = {}
             result = {**result, **coordinator.helper.run("install", str(artifact), request.sha256)}
-            database.execute("UPDATE update_history SET status='installed_pending_health', metadata_json=? WHERE id=?", (json.dumps({"backup": backup, "helper": result}), update_id))
+            database.execute("UPDATE update_history SET status='installed_pending_health', metadata_json=? WHERE id=?", (json.dumps({"backup": backup, "helper": result, "data_restore_required": request.restore_data}), update_id))
             return {"id": update_id, "status": "installed_pending_health", "backup": backup}
         except (UpdateFailure, OSError) as exc:
             code = exc.code if isinstance(exc, UpdateFailure) else "update_io_failed"

@@ -14,8 +14,15 @@ parser.add_argument("--sha256", required=True)
 parser.add_argument("--target-version", required=True)
 parser.add_argument("--wait-health", action="store_true")
 parser.add_argument("--operation", choices=("apply", "rollback"), default="apply")
+parser.add_argument("--target-schema", type=int)
+parser.add_argument("--restore-data", action="store_true")
+parser.add_argument("--backup-ref")
+parser.add_argument("--backup-sha256")
 args = parser.parse_args()
 payload = {"artifact_path": args.artifact, "sha256": args.sha256, "target_version": args.target_version}
+if args.target_schema is not None: payload["target_schema"] = args.target_schema
+if args.restore_data:
+    payload.update({"restore_data": True, "backup_ref": args.backup_ref, "backup_sha256": args.backup_sha256})
 request = Request(f"http://127.0.0.1:8766/v1/updates/native/{args.operation}", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
 try:
     with urlopen(request, timeout=180) as response:

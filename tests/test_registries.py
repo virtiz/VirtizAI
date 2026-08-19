@@ -102,3 +102,14 @@ def test_reconciler_refuses_schema_incompatible_pending_update(tmp_path: Path) -
     assert StartupUpdateReconciler(database).reconcile("0.1.0", 10) == 0
     assert database.fetch_one("SELECT status FROM update_history WHERE id='bad'")["status"] == "failed"
     database.close()
+
+
+def test_schema_11_synthetic_transition_is_real(tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.db")
+    database.open()
+    database.execute("INSERT INTO app_meta(key, value) VALUES ('synthetic_transition', 'old-value')")
+    from virtizai_core.migrations import migration_11
+    migration_11(database.connection)
+    assert database.fetch_one("SELECT value FROM app_meta WHERE key='synthetic_transition'")["value"] == "schema-11-transformed"
+    assert database.fetch_one("SELECT transformed_value FROM schema_transition_proof WHERE id='synthetic-transition'")["transformed_value"] == "schema-11-only"
+    database.close()

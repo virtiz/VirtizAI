@@ -583,6 +583,21 @@ def migration_10(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_11(connection: sqlite3.Connection) -> None:
+    """Synthetic Phase 10 rollback fixture: schema-only state is incompatible with v10."""
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS schema_transition_proof (
+            id TEXT PRIMARY KEY,
+            transformed_value TEXT NOT NULL
+        );
+        UPDATE app_meta SET value='schema-11-transformed' WHERE key='synthetic_transition';
+        INSERT OR IGNORE INTO schema_transition_proof(id, transformed_value)
+          VALUES ('synthetic-transition', 'schema-11-only');
+        """
+    )
+
+
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -594,6 +609,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (8, migration_8),
     (9, migration_9),
     (10, migration_10),
+    (11, migration_11),
 )
 
 
