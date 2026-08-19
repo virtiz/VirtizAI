@@ -175,6 +175,17 @@ class IdentityLink(BaseModel):
     display_name: str = "User"
 
 
+class ReleaseManifestInput(BaseModel):
+    manifest: dict
+
+
+class UpdatePolicyInput(BaseModel):
+    channel: str = "stable"
+    version_policy: str = "follow_channel"
+    pinned_version: str | None = None
+    skipped_versions: list[str] = Field(default_factory=list)
+
+
 def create_app(config: AppConfig | None = None) -> FastAPI:
     app_config = config or AppConfig.from_environment()
     app_config.ensure_directories()
@@ -251,6 +262,43 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "jobs": {row["status"]: row["count"] for row in jobs_summary},
             "recent_activity": [dict(row) for row in recent],
         }
+
+    @app.get("/v1/releases")
+    async def releases() -> dict:
+        return {"releases": app.state.updates.releases(), "history": app.state.updates.history(), "policy": app.state.updates.policy()}
+
+    @app.post("/v1/releases/import")
+    async def import_release(request: ReleaseManifestInput) -> dict:
+        try:
+            return app.state.updates.import_manifest(request.manifest)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/v1/updates/plan")
+    async def update_plan(platform: str) -> dict:
+        return app.state.updates.plan(app_config.app_version, platform)
+
+    @app.get("/v1/updates/policy")
+    async def update_policy() -> dict:
+        return app.state.updates.policy()
+
+    @app.put("/v1/updates/policy")
+    async def put_update_policy(request: UpdatePolicyInput) -> dict:
+        try:
+            return app.state.updates.set_policy(request.channel, request.version_policy, request.pinned_version, request.skipped_versions)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/v1/updates/{action}")
+    async def request_update(action: str, platform: str) -> dict:
+        if action not in {"update", "rollback"}:
+            raise HTTPException(status_code=404, detail="Unknown update action")
+        plan = app.state.updates.plan(app_config.app_version, platform)
+        if action == "update" and not plan["available"]:
+            raise HTTPException(status_code=409, detail="No verified update is available")
+        version = plan.get("release", {}).get("version", app_config.app_version)
+        update_id = app.state.updates.record(version, action, "planned", plan.get("artifact", {}).get("url"))
+        return {"id": update_id, "action": action, "status": "planned", "plan": plan, "privilege_boundary": "Use a platform updater helper or an external deployment tool to apply this verified plan."}
 
     @app.post("/v1/telemetry/prune")
     async def prune_telemetry() -> dict:

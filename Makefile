@@ -1,6 +1,6 @@
 VERSION := $(shell PYTHONPATH=. python3 -c 'from virtizai_core.version import __version__; print(__version__)')
 
-.PHONY: test build package docker checksums clean
+.PHONY: test build package docker checksums release-manifest clean
 
 test:
 	python3 -m pytest -q tests
@@ -16,6 +16,9 @@ docker:
 
 checksums: package
 	sha256sum dist/* > dist/SHA256SUMS
+
+release-manifest: package
+	python3 packaging/generate-release-manifest.py --version $(VERSION) --release-url https://github.com/virtiz/VirtizAI/releases/tag/v$(VERSION) --deb dist/virtizai_$(VERSION)_amd64.deb --output dist/release-manifest.json
 
 clean:
 	rm -rf dist build *.egg-info

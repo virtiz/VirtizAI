@@ -29,12 +29,13 @@ def main(argv: list[str] | None = None) -> int:
     for name in ('status','models','providers','roles','routes','jobs','projects','tools','releases'):
         sub.add_parser(name)
     chat = sub.add_parser('chat'); chat.add_argument('--session-id'); chat.add_argument('--project-id')
-    sub.add_parser('update'); sub.add_parser('rollback')
+    update = sub.add_parser('update'); update.add_argument('--platform', required=True)
+    rollback = sub.add_parser('rollback'); rollback.add_argument('--platform', required=True)
     args = parser.parse_args(argv); client = ApiClient(args.url)
     paths = {'status':'/healthz','models':'/v1/models','providers':'/v1/providers','roles':'/v1/roles','routes':'/v1/routes','jobs':'/v1/jobs','projects':'/v1/projects','tools':'/v1/tools','releases':'/v1/releases'}
     if args.command in paths: print_json(client.request(paths[args.command])); return 0
     if args.command in ('update','rollback'):
-        print(f'{args.command} is available through the shared Update Manager contract; backend implementation is pending.')
+        print_json(client.request(f'/v1/updates/{args.command}?platform={args.platform}', 'POST'))
         return 0
     if args.command == 'chat':
         user_id = 'cli-user'; session_id = args.session_id

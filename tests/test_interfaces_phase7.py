@@ -36,3 +36,22 @@ async def test_session_ownership_and_discord_config_redaction(tmp_path: Path) ->
         assert 'secret-ref' not in str(config)
         assert (await client.get('/v1/discord/command/status', params={'user_id':'guest'})).json()['status'] == 'ok'
         assert (await client.get('/v1/discord/command/update', params={'user_id':'guest'})).json()['error'] == 'permission_denied'
+
+
+@pytest.mark.asyncio
+async def test_release_api_plans_verified_updates(tmp_path: Path) -> None:
+    app = create_app(AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db"))
+    manifest = {
+        "version": "0.1.2", "channel": "stable", "release_url": "https://example.invalid/releases/v0.1.2",
+        "artifacts": [{"platform": "debian-amd64", "url": "https://example.invalid/virtizai.deb", "sha256": "b" * 64}],
+        "schema_compatibility": {"minimum": 1, "maximum": 10},
+        "rollback_compatibility": {"supported": True, "requires_data_restore": False},
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.post("/v1/releases/import", json={"manifest": manifest})).status_code == 200
+        plan = await client.get("/v1/updates/plan", params={"platform": "debian-amd64"})
+        assert plan.json()["available"] is True
+        update = await client.post("/v1/updates/update", params={"platform": "debian-amd64"})
+        assert update.status_code == 200
+        assert update.json()["status"] == "planned"
+        assert (await client.put("/v1/updates/policy", json={"channel": "stable", "version_policy": "pin_exact", "pinned_version": "0.1.1"})).status_code == 200

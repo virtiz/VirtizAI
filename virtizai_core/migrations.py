@@ -549,6 +549,40 @@ def migration_9(connection: sqlite3.Connection) -> None:
             connection.execute(f"ALTER TABLE messages ADD COLUMN {name} {definition}")
 
 
+def migration_10(connection: sqlite3.Connection) -> None:
+    """Add release manifests, update policies, and recovery records."""
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS release_manifests (
+            version TEXT PRIMARY KEY,
+            channel TEXT NOT NULL,
+            release_url TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            manifest_sha256 TEXT NOT NULL,
+            published_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS update_policies (
+            id TEXT PRIMARY KEY,
+            channel TEXT NOT NULL DEFAULT 'stable',
+            version_policy TEXT NOT NULL DEFAULT 'follow_channel',
+            pinned_version TEXT,
+            skipped_versions_json TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS update_backups (
+            id TEXT PRIMARY KEY,
+            update_id TEXT NOT NULL REFERENCES update_history(id) ON DELETE CASCADE,
+            backup_ref TEXT NOT NULL,
+            checksum_sha256 TEXT,
+            verified INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO update_policies(id) VALUES ('default') ON CONFLICT(id) DO NOTHING;
+        """
+    )
+
+
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -559,6 +593,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (7, migration_7),
     (8, migration_8),
     (9, migration_9),
+    (10, migration_10),
 )
 
 

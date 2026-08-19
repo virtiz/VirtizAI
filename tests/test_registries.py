@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from virtizai_core.db import Database
 from virtizai_core.execution import ExecutionManager
 from virtizai_core.registries import (
@@ -14,6 +16,19 @@ from virtizai_core.registries import (
     ToolRegistry,
     UpdateManager,
 )
+
+
+def release_manifest(version: str = "0.1.1", channel: str = "stable") -> dict:
+    return {
+        "version": version,
+        "channel": channel,
+        "release_url": f"https://github.com/virtiz/VirtizAI/releases/tag/v{version}",
+        "artifacts": [{"platform": "debian-amd64", "url": f"https://example.invalid/virtizai_{version}_amd64.deb", "sha256": "a" * 64}],
+        "classification": {"type": "bugfix", "severity": "low", "breaking": False},
+        "minimum_upgrade_version": "0.1.0",
+        "schema_compatibility": {"minimum": 1, "maximum": 10},
+        "rollback_compatibility": {"supported": True, "requires_data_restore": False},
+    }
 
 
 def test_required_registry_boundaries_have_canonical_storage(tmp_path: Path) -> None:
@@ -33,4 +48,24 @@ def test_required_registry_boundaries_have_canonical_storage(tmp_path: Path) -> 
     HealthManager(database).set_provider_status("missing", "unknown")
     assert database.fetch_one("SELECT COUNT(*) FROM projects")[0] == 1
     assert database.fetch_one("SELECT COUNT(*) FROM execution_attempts")[0] == 1
+    database.close()
+
+
+def test_update_manager_validates_manifest_and_policy(tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.db")
+    database.open()
+    manager = UpdateManager(database)
+    imported = manager.import_manifest(release_manifest())
+    assert imported["version"] == "0.1.1"
+    plan = manager.plan("0.1.0", "debian-amd64")
+    assert plan["available"] is True
+    assert plan["artifact"]["sha256"] == "a" * 64
+    policy = manager.set_policy("stable", "pin_exact", "0.1.1", [])
+    assert policy["pinned_version"] == "0.1.1"
+    manager.record("0.1.1", "update", "planned", plan["artifact"]["url"])
+    assert manager.history()[0]["action"] == "update"
+    with pytest.raises(ValueError, match="SHA-256"):
+        invalid = release_manifest()
+        invalid["artifacts"][0]["sha256"] = "invalid"
+        manager.import_manifest(invalid)
     database.close()
