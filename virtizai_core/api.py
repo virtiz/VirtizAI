@@ -343,6 +343,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         action = "native_rollback" if operation == "rollback" else "native_update"
         update_id = app.state.updates.record(request.target_version, action, "started", request.artifact_path)
         try:
+            if operation == "rollback" and _version_tuple(request.target_version) < _version_tuple(MIN_MANAGED_ROLLBACK_VERSION):
+                raise UpdateFailure("unsupported_rollback_baseline", f"Managed rollback targets must be >= {MIN_MANAGED_ROLLBACK_VERSION}")
             if operation == "rollback" and request.restore_data and (not request.backup_ref or not request.backup_sha256):
                 raise UpdateFailure("backup_required", "Data-restoring rollback requires a verified matching backup")
             artifact = Path(request.artifact_path)
@@ -353,8 +355,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             schema = database.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")["version"]
             if operation == "rollback" and request.target_schema is not None and request.target_schema < schema and not request.restore_data:
                 raise UpdateFailure("data_restore_required", "Application-only rollback is unsafe for an older schema")
-            if operation == "rollback" and _version_tuple(request.target_version) < _version_tuple(MIN_MANAGED_ROLLBACK_VERSION):
-                raise UpdateFailure("unsupported_rollback_baseline", f"Managed rollback targets must be >= {MIN_MANAGED_ROLLBACK_VERSION}")
             if operation == "rollback" and request.restore_data:
                 metadata = coordinator.inspect_backup(request.backup_ref, request.backup_sha256)
                 registered = database.fetch_one(
