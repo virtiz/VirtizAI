@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import resource
 import signal
 import uuid
@@ -58,7 +59,23 @@ class LocalExecutionDriver:
     def _limits(policy: ExecutionPolicy) -> None:
         try:
             resource.setrlimit(resource.RLIMIT_CPU, (max(1, int(policy.timeout_seconds)), max(1, int(policy.timeout_seconds))))
-            resource.setrlimit(resource.RLIMIT_NPROC, (policy.max_processes, policy.max_processes))
+            # RLIMIT_NPROC is per UID, not per child. Hosted runners already
+            # have unrelated processes under the runner UID, so a fixed total
+            # of 32 can prevent a shell tool from starting its one child.
+            # Reserve the requested number of processes beyond the current
+            # same-UID count while respecting any existing hard ceiling.
+            uid = os.getuid()
+            current = 0
+            for status in Path("/proc").glob("[0-9]*/status"):
+                try:
+                    if next(line for line in status.read_text().splitlines() if line.startswith("Uid:")).split()[1] == str(uid):
+                        current += 1
+                except (OSError, StopIteration, ValueError):
+                    continue
+            soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+            target = current + max(1, policy.max_processes)
+            if hard == resource.RLIM_INFINITY or target <= hard:
+                resource.setrlimit(resource.RLIMIT_NPROC, (target, target))
             resource.setrlimit(resource.RLIMIT_NOFILE, (policy.max_open_files, policy.max_open_files))
             if policy.max_memory_bytes is not None:
                 resource.setrlimit(resource.RLIMIT_AS, (policy.max_memory_bytes, policy.max_memory_bytes))
