@@ -15,7 +15,6 @@ Environment=VIRTIZAI_LOG_DIR=/var/log/virtizai
 ExecStart=/usr/lib/virtizai/venv/bin/uvicorn virtizai_core.main:app --host ${VIRTIZAI_HOST} --port ${VIRTIZAI_PORT}
 Restart=on-failure
 RestartSec=5
-NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
