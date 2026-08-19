@@ -8,7 +8,8 @@ from pathlib import Path
 
 def snapshot(connection: sqlite3.Connection) -> dict:
     value = connection.execute("SELECT value FROM app_meta WHERE key='synthetic_transition'").fetchone()
-    proof = connection.execute("SELECT transformed_value FROM schema_transition_proof WHERE id='synthetic-transition'").fetchone()
+    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    proof = connection.execute("SELECT transformed_value FROM schema_transition_proof WHERE id='synthetic-transition'").fetchone() if "schema_transition_proof" in tables else None
     schema = connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
     return {"schema_version": schema, "synthetic_transition": value[0] if value else None, "schema_transition_proof": proof[0] if proof else None}
 
