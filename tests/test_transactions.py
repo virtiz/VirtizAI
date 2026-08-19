@@ -2,9 +2,17 @@ import json
 import shutil
 from pathlib import Path
 import pytest
+import re
 from virtizai_core.transactions import TransactionJournal
 from virtizai_core.db import Database
 from virtizai_core.transactions import StartupTransactionReconciler
+
+def test_native_helper_supported_operations_are_reachable() -> None:
+    helper = Path(__file__).parents[1] / "packaging" / "virtizai-update-helper"
+    text = helper.read_text()
+    labels = re.findall(r"^([a-z]+)\)", text, re.MULTILINE)
+    assert {"backup", "restore", "install", "rollback"}.issubset(labels)
+    assert labels.index("rollback") < text.index("*) usage")
 
 def test_transaction_journal_atomic_lifecycle(tmp_path: Path) -> None:
     journal = TransactionJournal(tmp_path)

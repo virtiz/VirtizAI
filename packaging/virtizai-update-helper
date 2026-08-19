@@ -67,7 +67,6 @@ install)
     systemd-run --unit=virtizai-update-restart-$$ --on-active=2s /bin/systemctl restart virtizai.service >/dev/null
     printf '{"installed":true,"restart_scheduled":true}\n'
     ;;
-*) usage ;;
 rollback)
     [ "$#" -eq 7 ] || usage
     transaction_id=$1; archive=$2; expected_backup=$3; artifact=$4; expected_artifact=$5
@@ -88,4 +87,5 @@ PY
     systemctl start virtizai.service
     printf '{"rollback":true,"restart_pending":true}\n'
     ;;
+*) usage ;;
 esac
