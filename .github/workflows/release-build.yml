@@ -28,6 +28,11 @@ on:
         required: false
         type: boolean
         default: false
+      channel:
+        description: "Release channel metadata (stable, beta, or nightly)
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build:
@@ -72,8 +77,12 @@ jobs:
             source_version="$(python -c 'from virtizai_core.version import __version__; print(__version__)')"
           fi
           test "$source_version" = "$version"
-          channel=stable
-          if [ "${{ inputs.publish_release }}" != true ]; then channel=beta; fi
+          channel="${{ inputs.channel }}"
+          if [ -z "$channel" ]; then
+            channel=stable
+            if [ "${{ inputs.publish_release }}" != true ]; then channel=beta; fi
+          fi
+          case "$channel" in stable|beta|nightly) ;; *) echo "invalid release channel: $channel" >&2; exit 1 ;; esac
           case "$version" in *-*) channel=beta ;; esac
           image="${IMAGE_NAME,,}:$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
