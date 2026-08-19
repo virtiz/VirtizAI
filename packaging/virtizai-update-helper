@@ -60,7 +60,7 @@ install)
     case "$artifact" in "$DATA_DIR"/staging/*.deb) ;; *) exit 64;; esac
     actual=$(sha256sum "$artifact" | awk '{print $1}')
     [ "$actual" = "$expected" ] || { echo '{"error":"checksum_mismatch"}' >&2; exit 65; }
-    VIRTIZAI_MANAGED_UPDATE=1 DEBIAN_FRONTEND=noninteractive apt-get install -y "$artifact"
+    VIRTIZAI_MANAGED_UPDATE=1 DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades "$artifact"
     systemd-run --unit=virtizai-update-restart-$$ --on-active=2s /bin/systemctl restart virtizai.service >/dev/null
     printf '{"installed":true,"restart_scheduled":true}\n'
     ;;
