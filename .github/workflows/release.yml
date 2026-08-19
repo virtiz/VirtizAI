@@ -49,7 +49,18 @@ jobs:
           echo "image=${IMAGE_NAME,,}:$tag_version" >> "$GITHUB_OUTPUT"
 
       - name: Run complete test suite
-        run: python -m pytest -q tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q tests 2>&1 | tee pytest.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            while IFS= read -r line; do
+              echo "::error file=.github/workflows/pytest.log::${line}"
+            done < <(tail -40 pytest.log)
+            exit "$rc"
+          fi
+
 
       - name: Build application and frontend assets
         run: python -m compileall -q virtizai_core tests webui benchmarks virtizai_cli.py
