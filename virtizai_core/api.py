@@ -372,7 +372,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         except (UpdateFailure, OSError) as exc:
             code = exc.code if isinstance(exc, UpdateFailure) else "update_io_failed"
             message = exc.message if isinstance(exc, UpdateFailure) else str(exc)
-            database.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps({"code": code, "message": message}), update_id))
+            if database.connection is not None:
+                database.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps({"code": code, "message": message}), update_id))
             raise HTTPException(status_code=400, detail={"code": code, "message": message}) from exc
         finally:
             coordinator.release()

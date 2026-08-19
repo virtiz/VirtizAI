@@ -36,7 +36,7 @@ class NativeUpdateHelper:
     def run(self, operation: str, *arguments: str) -> dict:
         if not self.executable:
             raise UpdateFailure("helper_unconfigured", "No native updater helper is configured")
-        if operation not in {"backup", "restore", "install"}:
+        if operation not in {"backup", "restore", "install", "rollback"}:
             raise UpdateFailure("helper_operation_denied", "Unsupported helper operation")
         result = subprocess.run([*shlex.split(self.executable), operation, *arguments], check=False, capture_output=True, text=True, timeout=300)
         if result.returncode:
