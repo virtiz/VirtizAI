@@ -1,6 +1,6 @@
 VERSION := $(shell PYTHONPATH=. python3 -c 'from virtizai_core.version import __version__; print(__version__)')
 
-.PHONY: test build package docker checksums release-manifest clean
+.PHONY: test build package docker compose-up checksums release-manifest clean
 
 test:
 	python3 -m pytest -q tests
@@ -13,6 +13,9 @@ package: build
 
 docker:
 	docker build --build-arg VIRTIZAI_VERSION=$(VERSION) -t virtizai:$(VERSION) .
+
+compose-up:
+	VIRTIZAI_VERSION=$(VERSION) docker compose up --build -d
 
 checksums: package
 	sha256sum dist/* > dist/SHA256SUMS

@@ -2,10 +2,18 @@
 
 ## Docker Compose
 
-From a clean directory containing `compose.yaml` and the production Dockerfile:
+For a development checkout, use the version-aware command:
 
 ```bash
-docker compose up -d
+make compose-up
+```
+
+For a released source archive, set the release version explicitly before running
+Compose. The OCI image tag, build argument, API, and WebUI then report the same
+version:
+
+```bash
+VIRTIZAI_VERSION=0.1.1 docker compose up --build -d
 ```
 
 Open `http://127.0.0.1:8766/` or the host's configured address. Persistent

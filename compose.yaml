@@ -3,8 +3,8 @@ services:
     build:
       context: .
       args:
-        VIRTIZAI_VERSION: "0.1.0"
-    image: virtizai:0.1.0
+        VIRTIZAI_VERSION: ${VIRTIZAI_VERSION:-dev}
+    image: virtizai:${VIRTIZAI_VERSION:-dev}
     container_name: virtizai
     restart: unless-stopped
     ports:
