@@ -48,7 +48,10 @@ restore)
     temporary=$(mktemp -d)
     trap 'rm -rf "$temporary"' EXIT
     tar -C "$temporary" -xzf "$archive"
-    install -m 600 "$temporary/virtizai.db" "$DATA_DIR/virtizai.db"
+    database="$temporary/data/virtizai.db"
+    [ -f "$database" ] || database="$temporary/virtizai.db"
+    [ -f "$database" ] || { echo '{"error":"backup_invalid"}' >&2; exit 66; }
+    install -m 600 "$database" "$DATA_DIR/virtizai.db"
     rm -f "$DATA_DIR/virtizai.db-wal" "$DATA_DIR/virtizai.db-shm"
     if [ -d "$temporary/etc/virtizai" ]; then cp -a "$temporary/etc/virtizai/." "$CONFIG_DIR/"; fi
     chown -R virtizai:virtizai "$DATA_DIR" "$CONFIG_DIR"

@@ -349,8 +349,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             if operation == "rollback" and request.target_schema is not None and request.target_schema < schema and not request.restore_data:
                 raise UpdateFailure("data_restore_required", "Application-only rollback is unsafe for an older schema")
             if operation == "rollback" and request.restore_data:
+                metadata = coordinator.inspect_backup(request.backup_ref, request.backup_sha256)
+                registered = database.fetch_one(
+                    "SELECT verified FROM update_backups WHERE backup_ref=? AND checksum_sha256=?",
+                    (request.backup_ref, request.backup_sha256),
+                )
+                if registered is None or not registered["verified"]:
+                    raise UpdateFailure("backup_unverified", "Rollback requires a manager-verified backup")
                 result = coordinator.helper.run("restore", request.backup_ref, request.backup_sha256)
-                backup = {"backup_ref": request.backup_ref, "checksum_sha256": request.backup_sha256, "verified": True, "restored": True, "schema_version": schema}
+                backup = {"backup_ref": request.backup_ref, "checksum_sha256": request.backup_sha256, "verified": True, "restored": True, "schema_version": metadata["schema_version"]}
             else:
                 backup = coordinator.backup(update_id, app_config.app_version, request.target_version, schema)
                 result = {}

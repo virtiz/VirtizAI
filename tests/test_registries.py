@@ -81,6 +81,7 @@ def test_update_backup_lock_checksum_and_external_record(tmp_path: Path) -> None
     backup = coordinator.backup("update-1", "0.1.0", "0.1.1", 10)
     assert Path(backup["backup_ref"]).is_file()
     assert backup["verified"] is True
+    assert coordinator.inspect_backup(backup["backup_ref"], backup["checksum_sha256"])["schema_version"] == 10
     artifact = tmp_path / "artifact.deb"
     artifact.write_text("candidate")
     with pytest.raises(UpdateFailure, match="checksum"):

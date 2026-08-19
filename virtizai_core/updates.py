@@ -99,6 +99,32 @@ class UpdateCoordinator:
         if actual != expected_sha256:
             raise UpdateFailure("checksum_mismatch", "Artifact checksum does not match the release manifest")
 
+    def inspect_backup(self, backup_ref: str, expected_sha256: str) -> dict:
+        """Verify and describe a manager-created rollback archive before restoring it."""
+        archive = Path(backup_ref)
+        backups = (self.data_dir / "backups").resolve()
+        try:
+            resolved = archive.resolve(strict=True)
+        except OSError as exc:
+            raise UpdateFailure("backup_unavailable", "Rollback backup is unavailable") from exc
+        if backups not in resolved.parents or resolved.suffixes[-2:] != [".tar", ".gz"]:
+            raise UpdateFailure("backup_path_denied", "Rollback backup is outside the VirtizAI backup directory")
+        actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        if actual != expected_sha256:
+            raise UpdateFailure("backup_checksum_mismatch", "Rollback backup checksum does not match")
+        try:
+            with tarfile.open(resolved, "r:gz") as bundle:
+                member = bundle.getmember("metadata.json")
+                metadata_file = bundle.extractfile(member)
+                if metadata_file is None or "data/virtizai.db" not in bundle.getnames():
+                    raise UpdateFailure("backup_invalid", "Rollback backup is missing required VirtizAI state")
+                metadata = json.loads(metadata_file.read().decode())
+        except (OSError, tarfile.TarError, UnicodeDecodeError, json.JSONDecodeError, KeyError) as exc:
+            raise UpdateFailure("backup_invalid", "Rollback backup metadata is invalid") from exc
+        if not isinstance(metadata.get("schema_version"), int):
+            raise UpdateFailure("backup_invalid", "Rollback backup does not declare its schema version")
+        return metadata
+
     def record_external(self, old_version: str, new_version: str, source: str, schema_version: int, health: str) -> str:
         update_id = str(uuid.uuid4())
         self.database.execute(
