@@ -56,3 +56,33 @@ async def test_disabled_gateway_never_connects(tmp_path: Path):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         result = (await client.get("/v1/discord/status")).json()
         assert result["status"] == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_gateway_uses_shared_adapter_session_and_sends_chunks(tmp_path: Path):
+    from types import SimpleNamespace
+    from virtizai_core.db import Database
+    from virtizai_core.discord import DiscordReply
+    db = Database(tmp_path / "state.db")
+    db.open()
+    db.execute("UPDATE discord_config SET enabled=1, allow_dms=0, require_mentions=0 WHERE id='discord-default'")
+    calls = []
+    class Adapter:
+        async def handle_message(self, user_id, content, session_key=None, session_id=None, display_name="Discord user"):
+            calls.append((user_id, content, session_key, display_name))
+            return DiscordReply("reply", "session-1", {})
+    class Channel:
+        def __init__(self): self.sent=[]
+        async def send(self, value): self.sent.append(value)
+    channel = Channel()
+    channel.id = 0
+    message = SimpleNamespace(
+        author=SimpleNamespace(bot=False, id=42, display_name="Owner"),
+        guild=SimpleNamespace(id=7),
+        channel=channel,
+        content="hello",
+    )
+    gateway = DiscordGateway(Adapter(), db, FileSecretStore(tmp_path / "secrets.json"))
+    assert await gateway.handle_message(message) is True
+    assert calls == [("42", "hello", "guild:7:channel:0:user:42", "Owner")]
+    assert message.channel.sent == ["reply"]
