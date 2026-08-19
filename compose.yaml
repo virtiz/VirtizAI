@@ -13,6 +13,7 @@ services:
       VIRTIZAI_DATA_DIR: /data
       VIRTIZAI_WORKSPACE_DIR: /workspace
       VIRTIZAI_LOG_DIR: /var/log/virtizai
+      VIRTIZAI_UPDATE_SOURCE: docker_compose
     volumes:
       - virtizai-data:/data
       - virtizai-workspace:/workspace

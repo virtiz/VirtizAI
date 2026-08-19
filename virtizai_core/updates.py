@@ -149,14 +149,17 @@ class StartupUpdateReconciler:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    def reconcile(self, running_version: str, schema_version: int) -> int:
+    def reconcile(self, running_version: str, schema_version: int, health_status: str = "healthy") -> int:
         rows = self.database.fetch_all("SELECT id, metadata_json FROM update_history WHERE status='installed_pending_health' AND version=?", (running_version,))
         completed = 0
         for row in rows:
             metadata = json.loads(row["metadata_json"] or "{}")
             backup = metadata.get("backup", {})
             if not backup.get("verified") or backup.get("schema_version") != schema_version:
-                self.database.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps({**metadata, "code": "startup_reconciliation_failed"}), row["id"]))
+                self.database.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps({**metadata, "code": "startup_reconciliation_failed", "failure_stage": "startup_reconciliation"}), row["id"]))
+                continue
+            if health_status != "healthy":
+                self.database.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps({**metadata, "code": "health_validation_failed", "failure_stage": "health_validation", "health": health_status}), row["id"]))
                 continue
             self.database.execute("UPDATE update_history SET status='known_good' WHERE id=?", (row["id"],))
             completed += 1

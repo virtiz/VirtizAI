@@ -237,7 +237,32 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             pass
         raise
     schema_version = database.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")["version"]
-    StartupUpdateReconciler(database).reconcile(app_config.app_version, schema_version)
+    StartupUpdateReconciler(database).reconcile(app_config.app_version, schema_version, os.environ.get("VIRTIZAI_HEALTH_VALIDATION", "healthy"))
+    # Detect a package/image transition that did not pass through the manager.
+    # Managed updates have an installed_pending_health row and are reconciled
+    # above; only an unexplained version transition is recorded as external.
+    known = database.fetch_one("SELECT version FROM update_history WHERE status='known_good' ORDER BY rowid DESC LIMIT 1")
+    pending = database.fetch_one("SELECT id FROM update_history WHERE version=? AND status='installed_pending_health'", (app_config.app_version,))
+    source = os.environ.get("VIRTIZAI_UPDATE_SOURCE") or ("docker_compose" if Path("/.dockerenv").exists() else "native_package")
+    if known and known["version"] != app_config.app_version and pending is None:
+        already = database.fetch_one(
+            "SELECT id FROM update_history WHERE action='external_update' AND version=? AND release_ref=?",
+            (app_config.app_version, source),
+        )
+        if already is None:
+            database.execute(
+                "INSERT INTO update_history(id, version, action, status, release_ref, metadata_json) VALUES (?, ?, 'external_update', ?, ?, ?)",
+                (str(uuid.uuid4()), app_config.app_version, "healthy", source, json.dumps({
+                    "old_version": known["version"],
+                    "new_version": app_config.app_version,
+                    "update_source": "external",
+                    "source": source,
+                    "schema_version": schema_version,
+                    "migration_outcome": "startup_complete",
+                    "health_outcome": "healthy",
+                    "backup_created": False,
+                })),
+            )
     telemetry = TelemetryService(database)
     jobs = JobManager(database)
     providers = ProviderRegistry(database)
