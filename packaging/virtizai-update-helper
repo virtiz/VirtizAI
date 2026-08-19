@@ -5,7 +5,7 @@ set -eu
 DATA_DIR=/var/lib/virtizai
 CONFIG_DIR=/etc/virtizai
 BACKUP_DIR=/var/lib/virtizai/backups
-LOCK=/run/virtizai-update.lock
+LOCK=$DATA_DIR/update.lock
 
 usage() { echo "usage: $0 backup|restore|install" >&2; exit 64; }
 [ "$#" -ge 1 ] || usage
