@@ -247,6 +247,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         schema_version = database.fetch_one(
             "SELECT MAX(version) AS version FROM schema_migrations"
         )["version"]
+        database.execute("UPDATE update_history SET status='known_good' WHERE status='installed_pending_health' AND version=?", (app_config.app_version,))
         return {
             "status": "ok",
             "application": "VirtizAI",
@@ -331,8 +332,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             schema = database.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")["version"]
             backup = coordinator.backup(update_id, app_config.app_version, request.target_version, schema)
             result = coordinator.helper.run("install", str(artifact), request.sha256)
-            database.execute("UPDATE update_history SET status='known_good', metadata_json=? WHERE id=?", (json.dumps({"backup": backup, "helper": result}), update_id))
-            return {"id": update_id, "status": "known_good", "backup": backup}
+            database.execute("UPDATE update_history SET status='installed_pending_health', metadata_json=? WHERE id=?", (json.dumps({"backup": backup, "helper": result}), update_id))
+            return {"id": update_id, "status": "installed_pending_health", "backup": backup}
         except UpdateFailure as exc:
             database.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps({"code": exc.code, "message": exc.message}), update_id))
             raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message}) from exc

@@ -61,8 +61,8 @@ install)
     actual=$(sha256sum "$artifact" | awk '{print $1}')
     [ "$actual" = "$expected" ] || { echo '{"error":"checksum_mismatch"}' >&2; exit 65; }
     DEBIAN_FRONTEND=noninteractive apt-get install -y "$artifact"
-    systemctl restart virtizai.service
-    printf '{"installed":true}\n'
+    systemd-run --unit=virtizai-update-restart --on-active=2s /bin/systemctl restart virtizai.service >/dev/null
+    printf '{"installed":true,"restart_scheduled":true}\n'
     ;;
 *) usage ;;
 esac
