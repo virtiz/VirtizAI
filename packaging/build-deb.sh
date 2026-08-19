@@ -6,10 +6,15 @@ ARCH=${DEB_ARCH:-amd64}
 OUT=${OUT_DIR:-"$ROOT/dist"}
 PKG="$OUT/virtizai_${VERSION}_${ARCH}"
 rm -rf "$PKG" "$OUT/virtizai_${VERSION}_${ARCH}.deb"
-mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/virtizai" "$PKG/etc/virtizai" "$PKG/var/lib/virtizai/workspace" "$PKG/var/log/virtizai"
+mkdir -p "$PKG/DEBIAN" "$PKG/usr/lib/virtizai" "$PKG/usr/libexec" "$PKG/etc/virtizai" "$PKG/etc/sudoers.d" "$PKG/var/lib/virtizai/workspace" "$PKG/var/log/virtizai"
 cp "$ROOT/pyproject.toml" "$ROOT/requirements-runtime.txt" "$ROOT/README.md" "$ROOT/virtizai_cli.py" "$PKG/usr/lib/virtizai/"
 cp -R "$ROOT/virtizai_core" "$ROOT/webui" "$PKG/usr/lib/virtizai/"
 find "$PKG/usr/lib/virtizai" -type d -name __pycache__ -prune -exec rm -rf {} +
+install -m 755 "$ROOT/packaging/virtizai-update-helper" "$PKG/usr/libexec/virtizai-update-helper"
+cat > "$PKG/etc/sudoers.d/virtizai-update" <<'EOF'
+virtizai ALL=(root) NOPASSWD: /usr/libexec/virtizai-update-helper *
+EOF
+chmod 440 "$PKG/etc/sudoers.d/virtizai-update"
 cat > "$PKG/etc/virtizai/virtizai.env" <<'EOF'
 VIRTIZAI_HOST=127.0.0.1
 VIRTIZAI_PORT=8766
@@ -23,7 +28,7 @@ Version: $VERSION
 Section: net
 Priority: optional
 Architecture: $ARCH
-Depends: python3 (>= 3.11), python3-venv, ca-certificates
+Depends: python3 (>= 3.11), python3-venv, ca-certificates, sudo
 Maintainer: VirtizAI
 Description: Self-hosted AI orchestration core
  Independent WebUI, provider routing, tools, and execution core.

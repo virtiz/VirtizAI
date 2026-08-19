@@ -1,0 +1,68 @@
+#!/bin/sh
+# Root-owned fixed-command helper. It intentionally accepts no arbitrary command.
+set -eu
+
+DATA_DIR=/var/lib/virtizai
+CONFIG_DIR=/etc/virtizai
+BACKUP_DIR=/var/lib/virtizai/backups
+LOCK=/run/virtizai-update.lock
+
+usage() { echo "usage: $0 backup|restore|install" >&2; exit 64; }
+[ "$#" -ge 1 ] || usage
+operation=$1
+shift
+
+exec 9>"$LOCK"
+flock -n 9 || { echo '{"error":"update_in_progress"}' >&2; exit 75; }
+
+case "$operation" in
+backup)
+    [ "$#" -eq 4 ] || usage
+    update_id=$1 source_version=$2 target_version=$3 schema_version=$4
+    case "$update_id" in *[!A-Za-z0-9-]*) exit 64;; esac
+    mkdir -p "$BACKUP_DIR"
+    archive="$BACKUP_DIR/$update_id.tar.gz"
+    temporary=$(mktemp -d)
+    trap 'rm -rf "$temporary"' EXIT
+    python3 - "$DATA_DIR/virtizai.db" "$temporary/virtizai.db" <<'PY'
+import sqlite3, sys
+source, destination = sys.argv[1:]
+input_db = sqlite3.connect(source)
+output_db = sqlite3.connect(destination)
+input_db.backup(output_db)
+output_db.close(); input_db.close()
+PY
+    printf '{"update_id":"%s","source_version":"%s","target_version":"%s","schema_version":%s}\n' "$update_id" "$source_version" "$target_version" "$schema_version" > "$temporary/metadata.json"
+    mkdir -p "$temporary/etc"
+    if [ -d "$CONFIG_DIR" ]; then cp -a "$CONFIG_DIR" "$temporary/etc/virtizai"; fi
+    tar -C "$temporary" -czf "$archive" virtizai.db metadata.json etc
+    checksum=$(sha256sum "$archive" | awk '{print $1}')
+    printf '{"backup_ref":"%s","checksum_sha256":"%s","verified":true}\n' "$archive" "$checksum"
+    ;;
+restore)
+    [ "$#" -eq 2 ] || usage
+    archive=$1 expected=$2
+    case "$archive" in "$BACKUP_DIR"/*.tar.gz) ;; *) exit 64;; esac
+    actual=$(sha256sum "$archive" | awk '{print $1}')
+    [ "$actual" = "$expected" ] || { echo '{"error":"checksum_mismatch"}' >&2; exit 65; }
+    temporary=$(mktemp -d)
+    trap 'rm -rf "$temporary"' EXIT
+    tar -C "$temporary" -xzf "$archive"
+    install -m 600 "$temporary/virtizai.db" "$DATA_DIR/virtizai.db"
+    rm -f "$DATA_DIR/virtizai.db-wal" "$DATA_DIR/virtizai.db-shm"
+    if [ -d "$temporary/etc/virtizai" ]; then cp -a "$temporary/etc/virtizai/." "$CONFIG_DIR/"; fi
+    chown -R virtizai:virtizai "$DATA_DIR" "$CONFIG_DIR"
+    printf '{"restored":true}\n'
+    ;;
+install)
+    [ "$#" -eq 2 ] || usage
+    artifact=$1 expected=$2
+    case "$artifact" in "$DATA_DIR"/staging/*.deb) ;; *) exit 64;; esac
+    actual=$(sha256sum "$artifact" | awk '{print $1}')
+    [ "$actual" = "$expected" ] || { echo '{"error":"checksum_mismatch"}' >&2; exit 65; }
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "$artifact"
+    systemctl restart virtizai.service
+    printf '{"installed":true}\n'
+    ;;
+*) usage ;;
+esac

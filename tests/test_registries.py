@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from virtizai_core.registries import (
     ToolRegistry,
     UpdateManager,
 )
+from virtizai_core.updates import UpdateCoordinator, UpdateFailure
 
 
 def release_manifest(version: str = "0.1.1", channel: str = "stable") -> dict:
@@ -68,4 +70,25 @@ def test_update_manager_validates_manifest_and_policy(tmp_path: Path) -> None:
         invalid = release_manifest()
         invalid["artifacts"][0]["sha256"] = "invalid"
         manager.import_manifest(invalid)
+    database.close()
+
+
+def test_update_backup_lock_checksum_and_external_record(tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.db")
+    database.open()
+    database.execute("INSERT INTO update_history(id, version, action, status) VALUES ('update-1', '0.1.1', 'update', 'started')")
+    coordinator = UpdateCoordinator(database, tmp_path / "data", config_dir=tmp_path / "etc")
+    backup = coordinator.backup("update-1", "0.1.0", "0.1.1", 10)
+    assert Path(backup["backup_ref"]).is_file()
+    assert backup["verified"] is True
+    artifact = tmp_path / "artifact.deb"
+    artifact.write_text("candidate")
+    with pytest.raises(UpdateFailure, match="checksum"):
+        coordinator.verify_artifact(artifact, "0" * 64)
+    assert coordinator.acquire() is True
+    assert coordinator.acquire() is False
+    coordinator.release()
+    external = coordinator.record_external("0.1.0", "0.1.1", "native_package", 10, "healthy")
+    metadata = json.loads(database.fetch_one("SELECT metadata_json FROM update_history WHERE id=?", (external,))["metadata_json"])
+    assert metadata["backup_created"] is False
     database.close()

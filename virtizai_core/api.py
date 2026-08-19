@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from .costs import CostService
 from .retention import RetentionService
 from .interfaces import InterfaceRequest, InterfaceService
 from .discord import DiscordAdapter
+from .updates import NativeUpdateHelper, UpdateCoordinator, UpdateFailure
 
 
 class SessionCreate(BaseModel):
@@ -186,6 +188,19 @@ class UpdatePolicyInput(BaseModel):
     skipped_versions: list[str] = Field(default_factory=list)
 
 
+class NativeUpdateRequest(BaseModel):
+    artifact_path: str
+    sha256: str
+    target_version: str
+
+
+class ExternalUpdateRecord(BaseModel):
+    old_version: str
+    new_version: str
+    source: str
+    health: str
+
+
 def create_app(config: AppConfig | None = None) -> FastAPI:
     app_config = config or AppConfig.from_environment()
     app_config.ensure_directories()
@@ -209,6 +224,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.integrations = IntegrationRegistry(database)
     app.state.memory = MemoryService(database)
     app.state.updates = UpdateManager(database)
+    app.state.update_coordinator = UpdateCoordinator(database, app_config.data_dir, helper=NativeUpdateHelper(os.environ.get("VIRTIZAI_UPDATE_HELPER")))
     app.state.costs = CostService(database)
     app.state.retention = RetentionService(database)
     app.state.config = app_config
@@ -300,6 +316,35 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         update_id = app.state.updates.record(version, action, "planned", plan.get("artifact", {}).get("url"))
         return {"id": update_id, "action": action, "status": "planned", "plan": plan, "privilege_boundary": "Use a platform updater helper or an external deployment tool to apply this verified plan."}
 
+    @app.post("/v1/updates/native/apply")
+    async def apply_native_update(request: NativeUpdateRequest) -> dict:
+        coordinator = app.state.update_coordinator
+        if not coordinator.acquire():
+            raise HTTPException(status_code=409, detail="An update or rollback is already in progress")
+        update_id = app.state.updates.record(request.target_version, "native_update", "started", request.artifact_path)
+        try:
+            artifact = Path(request.artifact_path)
+            staging = app_config.data_dir / "staging"
+            if artifact.parent != staging or artifact.suffix != ".deb":
+                raise UpdateFailure("artifact_path_denied", "Artifacts must be staged under the VirtizAI data directory")
+            coordinator.verify_artifact(artifact, request.sha256)
+            schema = database.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")["version"]
+            backup = coordinator.backup(update_id, app_config.app_version, request.target_version, schema)
+            result = coordinator.helper.run("install", str(artifact), request.sha256)
+            database.execute("UPDATE update_history SET status='known_good', metadata_json=? WHERE id=?", (json.dumps({"backup": backup, "helper": result}), update_id))
+            return {"id": update_id, "status": "known_good", "backup": backup}
+        except UpdateFailure as exc:
+            database.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps({"code": exc.code, "message": exc.message}), update_id))
+            raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message}) from exc
+        finally:
+            coordinator.release()
+
+    @app.post("/v1/updates/external")
+    async def record_external_update(request: ExternalUpdateRecord) -> dict:
+        schema = database.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")["version"]
+        update_id = app.state.update_coordinator.record_external(request.old_version, request.new_version, request.source, schema, request.health)
+        return {"id": update_id, "backup_created": False, "source": request.source}
+
     @app.post("/v1/telemetry/prune")
     async def prune_telemetry() -> dict:
         return app.state.retention.prune()
@@ -365,6 +410,20 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/v1/discord/command/{command}")
     async def discord_command(command: str, user_id: str) -> dict:
         return await app.state.discord.command(user_id, command)
+
+    @app.post("/v1/discord/confirm/{confirmation_id}")
+    async def confirm_discord_update(confirmation_id: str, user_id: str) -> dict:
+        result = app.state.discord.confirm_update(user_id, confirmation_id)
+        if "error" in result:
+            raise HTTPException(status_code=403, detail=result["error"])
+        return result
+
+    @app.post("/v1/discord/release-event/{event_type}")
+    async def discord_release_event(event_type: str, payload: dict) -> dict:
+        try:
+            return app.state.discord.emit_release_event(event_type, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/v1/discord/config")
     async def discord_config() -> dict:

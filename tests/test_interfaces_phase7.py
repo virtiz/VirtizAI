@@ -37,13 +37,17 @@ async def test_session_ownership_and_discord_config_redaction(tmp_path: Path) ->
         assert (await client.get('/v1/discord/command/status', params={'user_id':'guest'})).json()['status'] == 'ok'
         assert 'releases' in (await client.get('/v1/discord/command/releases', params={'user_id':'guest'})).json()
         assert (await client.get('/v1/discord/command/update', params={'user_id':'guest'})).json()['error'] == 'permission_denied'
+        confirmation = (await client.get('/v1/discord/command/update', params={'user_id':'admin'})).json()
+        assert confirmation['status'] == 'confirmation_required'
+        assert (await client.post(f"/v1/discord/confirm/{confirmation['confirmation_id']}", params={'user_id':'admin'})).json()['action'] == 'update'
+        assert (await client.post('/v1/discord/release-event/update_completed', json={'version':'0.1.1'})).json()['event_type'] == 'update_completed'
 
 
 @pytest.mark.asyncio
 async def test_release_api_plans_verified_updates(tmp_path: Path) -> None:
     app = create_app(AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db"))
     manifest = {
-        "version": "0.1.3", "channel": "stable", "release_url": "https://example.invalid/releases/v0.1.3",
+        "version": "0.1.4", "channel": "stable", "release_url": "https://example.invalid/releases/v0.1.4",
         "artifacts": [{"platform": "debian-amd64", "url": "https://example.invalid/virtizai.deb", "sha256": "b" * 64}],
         "schema_compatibility": {"minimum": 1, "maximum": 10},
         "rollback_compatibility": {"supported": True, "requires_data_restore": False},
