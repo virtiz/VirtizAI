@@ -4,6 +4,7 @@ import json
 import uuid
 import asyncio
 import os
+import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -216,7 +217,25 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     webui_dir = Path(__file__).resolve().parent.parent / "webui"
     app.mount("/static", StaticFiles(directory=webui_dir), name="static")
     database = Database(app_config.database_path)
-    database.open()
+    try:
+        database.open()
+    except Exception as exc:
+        # Migration failures happen before FastAPI is available. Persist the
+        # failed target directly so recovery tooling can distinguish it from
+        # an interrupted update; the unit is configured not to restart-loop.
+        try:
+            recovery = sqlite3.connect(app_config.database_path)
+            recovery.execute("PRAGMA busy_timeout=5000")
+            row = recovery.execute("SELECT id, metadata_json FROM update_history WHERE status='installed_pending_health' ORDER BY rowid DESC LIMIT 1").fetchone()
+            if row:
+                metadata = json.loads(row[1] or "{}")
+                metadata.update({"code": "startup_reconciliation_failed", "failure_stage": "startup_migration", "message": str(exc)})
+                recovery.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps(metadata), row[0]))
+                recovery.commit()
+            recovery.close()
+        except Exception:
+            pass
+        raise
     schema_version = database.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")["version"]
     StartupUpdateReconciler(database).reconcile(app_config.app_version, schema_version)
     telemetry = TelemetryService(database)

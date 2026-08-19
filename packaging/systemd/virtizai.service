@@ -13,7 +13,9 @@ Environment=VIRTIZAI_DATA_DIR=/var/lib/virtizai
 Environment=VIRTIZAI_WORKSPACE_DIR=/var/lib/virtizai/workspace
 Environment=VIRTIZAI_LOG_DIR=/var/log/virtizai
 ExecStart=/usr/lib/virtizai/venv/bin/uvicorn virtizai_core.main:app --host ${VIRTIZAI_HOST} --port ${VIRTIZAI_PORT}
-Restart=on-failure
+# Startup/migration failures are recorded as failed updates and must remain
+# stopped for recovery tooling; automatic restarts would loop.
+Restart=no
 RestartSec=5
 PrivateTmp=true
 ProtectHome=true
