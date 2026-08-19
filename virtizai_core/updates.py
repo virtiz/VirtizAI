@@ -40,7 +40,10 @@ class NativeUpdateHelper:
         result = subprocess.run([*shlex.split(self.executable), operation, *arguments], check=False, capture_output=True, text=True, timeout=300)
         if result.returncode:
             raise UpdateFailure("helper_failed", result.stderr.strip() or result.stdout.strip() or "Native helper failed")
-        return json.loads(result.stdout)
+        for line in reversed(result.stdout.splitlines()):
+            if line.startswith("{"):
+                return json.loads(line)
+        raise UpdateFailure("helper_invalid_response", "Native helper did not return structured JSON")
 
 
 class UpdateCoordinator:
