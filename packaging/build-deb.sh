@@ -18,6 +18,7 @@ chmod 440 "$PKG/etc/sudoers.d/virtizai-update"
 cat > "$PKG/etc/virtizai/virtizai.env" <<'EOF'
 VIRTIZAI_HOST=127.0.0.1
 VIRTIZAI_PORT=8766
+VIRTIZAI_UPDATE_HELPER=sudo /usr/libexec/virtizai-update-helper
 EOF
 cp "$ROOT/packaging/systemd/virtizai.service" "$PKG/libvirtizai.service.tmp"
 mkdir -p "$PKG/lib/systemd/system"

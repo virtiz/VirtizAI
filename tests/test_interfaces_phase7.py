@@ -47,7 +47,7 @@ async def test_session_ownership_and_discord_config_redaction(tmp_path: Path) ->
 async def test_release_api_plans_verified_updates(tmp_path: Path) -> None:
     app = create_app(AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db"))
     manifest = {
-        "version": "0.1.4", "channel": "stable", "release_url": "https://example.invalid/releases/v0.1.4",
+        "version": "0.1.5", "channel": "stable", "release_url": "https://example.invalid/releases/v0.1.5",
         "artifacts": [{"platform": "debian-amd64", "url": "https://example.invalid/virtizai.deb", "sha256": "b" * 64}],
         "schema_compatibility": {"minimum": 1, "maximum": 10},
         "rollback_compatibility": {"supported": True, "requires_data_restore": False},
