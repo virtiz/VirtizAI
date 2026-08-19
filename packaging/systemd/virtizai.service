@@ -16,7 +16,6 @@ ExecStart=/usr/lib/virtizai/venv/bin/uvicorn virtizai_core.main:app --host ${VIR
 Restart=on-failure
 RestartSec=5
 PrivateTmp=true
-ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/virtizai /var/log/virtizai
 

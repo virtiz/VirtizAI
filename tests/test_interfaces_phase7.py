@@ -48,7 +48,7 @@ async def test_session_ownership_and_discord_config_redaction(tmp_path: Path) ->
 async def test_release_api_plans_verified_updates(tmp_path: Path) -> None:
     app = create_app(AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db"))
     manifest = {
-        "version": "0.1.14", "channel": "stable", "release_url": "https://example.invalid/releases/v0.1.14",
+        "version": "0.1.15", "channel": "stable", "release_url": "https://example.invalid/releases/v0.1.15",
         "artifacts": [{"platform": "debian-amd64", "url": "https://example.invalid/virtizai.deb", "sha256": "b" * 64}],
         "schema_compatibility": {"minimum": 1, "maximum": 10},
         "rollback_compatibility": {"supported": True, "requires_data_restore": False},
@@ -67,7 +67,7 @@ async def test_release_api_plans_verified_updates(tmp_path: Path) -> None:
 async def test_startup_marks_matching_pending_update_known_good(tmp_path: Path) -> None:
     config = AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db")
     app = create_app(config)
-    app.state.database.execute("INSERT INTO update_history(id, version, action, status, metadata_json) VALUES ('pending', '0.1.13', 'native_update', 'installed_pending_health', ?)", (json.dumps({"backup": {"verified": True, "schema_version": 10}}),))
+    app.state.database.execute("INSERT INTO update_history(id, version, action, status, metadata_json) VALUES ('pending', '0.1.14', 'native_update', 'installed_pending_health', ?)", (json.dumps({"backup": {"verified": True, "schema_version": 10}}),))
     restarted = create_app(config)
     assert restarted
     assert app.state.database.fetch_one("SELECT status FROM update_history WHERE id='pending'")["status"] == "known_good"
