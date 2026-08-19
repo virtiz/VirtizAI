@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.30,<1",
+  "discord.py>=2.4,<3",
 ]
 
 [project.optional-dependencies]

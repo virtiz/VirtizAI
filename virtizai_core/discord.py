@@ -16,7 +16,7 @@ class DiscordReply:
 
 
 class DiscordAdapter:
-    """In-process adapter; transport integration is optional and injectable."""
+    """Shared Discord interface adapter used by the Gateway transport and HTTP API."""
 
     def __init__(self, interfaces: InterfaceService, updates: UpdateManager) -> None:
         self.interfaces = interfaces

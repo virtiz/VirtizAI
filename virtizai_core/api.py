@@ -37,6 +37,8 @@ from .costs import CostService
 from .retention import RetentionService
 from .interfaces import InterfaceRequest, InterfaceService
 from .discord import DiscordAdapter
+from .discord_gateway import DiscordGateway
+from .secrets import FileSecretStore
 from .transactions import StartupTransactionReconciler
 from .updates import NativeUpdateHelper, StartupUpdateReconciler, UpdateCoordinator, UpdateFailure
 
@@ -145,6 +147,10 @@ class InterfaceMessage(BaseModel):
     response_verbosity: str | None = None
     execution_updates: str | None = None
     tool_details: str | None = None
+
+
+class SecretValueUpdate(BaseModel):
+    value: str = Field(min_length=1, max_length=4096)
 
 
 class DiscordConfigUpdate(BaseModel):
@@ -289,12 +295,18 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.core = core
     app.state.interfaces = InterfaceService(database, core)
     app.state.discord = DiscordAdapter(app.state.interfaces, app.state.updates)
+    app.state.secrets = FileSecretStore(app_config.data_dir / "secrets.json")
+    app.state.discord_gateway = DiscordGateway(app.state.discord, database, app.state.secrets)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        yield
-        await jobs.wait_for_idle()
-        database.close()
+        await app.state.discord_gateway.start()
+        try:
+            yield
+        finally:
+            await app.state.discord_gateway.stop()
+            await jobs.wait_for_idle()
+            database.close()
 
     app.router.lifespan_context = lifespan
 
@@ -512,22 +524,50 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.get("/v1/secrets/{reference}")
+    async def secret_status(reference: str) -> dict:
+        try:
+            configured = app.state.secrets.configured(reference)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"reference": reference, "configured": configured}
+
+    @app.put("/v1/secrets/{reference}")
+    async def put_secret(reference: str, request: SecretValueUpdate) -> dict:
+        try:
+            app.state.secrets.set(reference, request.value)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"reference": reference, "configured": True}
+
+    @app.delete("/v1/secrets/{reference}")
+    async def delete_secret(reference: str) -> dict:
+        try:
+            app.state.secrets.delete(reference)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"reference": reference, "deleted": True}
+
     @app.get("/v1/discord/config")
     async def discord_config() -> dict:
         row = dict(database.fetch_one("SELECT * FROM discord_config WHERE id = 'discord-default'"))
-        for field in ("bot_secret_ref", "enabled", "mode", "allow_dms", "require_mentions", "slash_commands", "dedicated_channel_id", "release_channel_id"):
-            if field in {"bot_secret_ref", "dedicated_channel_id", "release_channel_id", "mode"}:
-                continue
+        secret_ref = row.get("bot_secret_ref")
         for field in ("allowed_servers_json", "allowed_channels_json", "allowed_users_json", "allowed_roles_json", "admin_users_json", "admin_roles_json"):
-            row[field.removesuffix("_json")] = json.loads(row.pop(field))
-        row["bot_secret_configured"] = bool(row.get("bot_secret_ref"))
+            row[field.removesuffix("_json")] = json.loads(row.pop(field) or "[]")
+        row["bot_secret_configured"] = bool(secret_ref and app.state.secrets.configured(secret_ref))
         row.pop("bot_secret_ref", None)
+        row["gateway"] = app.state.discord_gateway.status()
         return row
+
+    @app.get("/v1/discord/status")
+    async def discord_status() -> dict:
+        return app.state.discord_gateway.status()
 
     @app.put("/v1/discord/config")
     async def update_discord_config(request: DiscordConfigUpdate) -> dict:
         values = request.model_dump()
         database.execute("""UPDATE discord_config SET enabled=?, mode=?, bot_secret_ref=?, allow_dms=?, require_mentions=?, slash_commands=?, dedicated_channel_id=?, release_channel_id=?, allowed_servers_json=?, allowed_channels_json=?, allowed_users_json=?, allowed_roles_json=?, admin_users_json=?, admin_roles_json=?, updated_at=CURRENT_TIMESTAMP WHERE id='discord-default'""", (int(values["enabled"]), values["mode"], values["bot_secret_ref"], int(values["allow_dms"]), int(values["require_mentions"]), int(values["slash_commands"]), values["dedicated_channel_id"], values["release_channel_id"], json.dumps(values["allowed_servers"]), json.dumps(values["allowed_channels"]), json.dumps(values["allowed_users"]), json.dumps(values["allowed_roles"]), json.dumps(values["admin_users"]), json.dumps(values["admin_roles"])))
+        await app.state.discord_gateway.reload()
         return await discord_config()
 
     @app.get("/")

@@ -31,6 +31,7 @@ async def test_interfaces_share_session_and_metadata(tmp_path: Path) -> None:
 async def test_session_ownership_and_discord_config_redaction(tmp_path: Path) -> None:
     app = create_app(AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db"))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.put('/v1/secrets/secret-ref', json={'value':'test-token'})
         response = await client.put('/v1/discord/config', json={'enabled':True,'bot_secret_ref':'secret-ref','release_channel_id':'release-channel','admin_users':['admin']})
         assert response.status_code == 200
         config = (await client.get('/v1/discord/config')).json()
