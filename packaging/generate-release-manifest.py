@@ -24,6 +24,10 @@ def main() -> int:
     parser.add_argument("--release-url", required=True)
     parser.add_argument("--deb", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--target-schema", type=int, required=True)
+    parser.add_argument("--minimum-upgrade-version", required=True)
+    parser.add_argument("--rollback-requires-data-restore", action="store_true")
+    parser.add_argument("--rollback-baseline", action="append", default=[])
     args = parser.parse_args()
     manifest = {
         "version": args.version,
@@ -31,9 +35,9 @@ def main() -> int:
         "release_url": args.release_url,
         "artifacts": [{"platform": "debian-amd64", "url": args.deb.name, "sha256": sha256(args.deb)}],
         "classification": {"type": "bugfix", "severity": "low", "breaking": False},
-        "minimum_upgrade_version": args.version,
-        "schema_compatibility": {"minimum": 1, "maximum": 10},
-        "rollback_compatibility": {"supported": True, "requires_data_restore": False},
+        "minimum_upgrade_version": args.minimum_upgrade_version,
+        "schema_compatibility": {"minimum": args.target_schema, "maximum": args.target_schema, "target": args.target_schema},
+        "rollback_compatibility": {"supported": True, "requires_data_restore": args.rollback_requires_data_restore, "application_only_compatible": not args.rollback_requires_data_restore, "compatible_baselines": args.rollback_baseline},
     }
     args.output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return 0
