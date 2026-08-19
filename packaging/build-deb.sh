@@ -33,8 +33,8 @@ Priority: optional
 Architecture: $ARCH
 Depends: python3 (>= 3.11), python3-venv, ca-certificates, sudo
 Maintainer: VirtizAI
-Description: Self-hosted AI orchestration core
- Independent WebUI, provider routing, tools, and execution core.
+Description: Self-hosted AI orchestration platform
+ WebUI, provider routing, tools, and execution platform.
 EOF
 cat > "$PKG/DEBIAN/postinst" <<'EOF'
 #!/bin/sh

@@ -3,7 +3,7 @@ FROM python:3.12-slim AS runtime
 ARG VIRTIZAI_VERSION=dev
 LABEL org.opencontainers.image.title="VirtizAI" \
       org.opencontainers.image.version="$VIRTIZAI_VERSION" \
-      org.opencontainers.image.description="Self-hosted AI orchestration core"
+      org.opencontainers.image.description="Self-hosted AI orchestration platform"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

@@ -213,7 +213,7 @@ def _version_tuple(value: str) -> tuple[int, ...]:
 def create_app(config: AppConfig | None = None) -> FastAPI:
     app_config = config or AppConfig.from_environment()
     app_config.ensure_directories()
-    app = FastAPI(title="VirtizAI Core", version=__version__)
+    app = FastAPI(title="VirtizAI", version=__version__)
     webui_dir = Path(__file__).resolve().parent.parent / "webui"
     app.mount("/static", StaticFiles(directory=webui_dir), name="static")
     database = Database(app_config.database_path)

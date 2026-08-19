@@ -1,5 +1,5 @@
 [Unit]
-Description=VirtizAI self-hosted AI orchestration core
+Description=VirtizAI self-hosted AI orchestration platform
 After=network-online.target
 Wants=network-online.target
 

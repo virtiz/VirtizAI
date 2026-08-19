@@ -3,9 +3,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "virtizai-core"
+name = "virtizai"
 dynamic = ["version"]
-description = "Independent self-hosted AI orchestration core"
+description = "Self-hosted AI orchestration platform"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",

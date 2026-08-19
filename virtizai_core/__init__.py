@@ -1,4 +1,4 @@
-"""VirtizAI core application package."""
+"""VirtizAI application package."""
 
 from .version import __version__
 

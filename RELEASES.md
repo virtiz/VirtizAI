@@ -1,57 +1,24 @@
-# VirtizAI Release Candidates
+# VirtizAI releases
 
-GitHub Releases are the canonical release source. Until the Phase 13 release gate
-passes, every published VirtizAI release is a prerelease candidate. Immutable tags
-and their assets are never rewritten.
+Git tags and published assets are immutable. Each release is built from its exact tagged commit and published with a checksum-bound manifest.
 
-## Candidate flow
+## Versioning and channels
 
-1. Commit and tag an immutable version.
-2. Build native artifacts and `release-manifest.json` from that exact tag.
-3. Publish the assets as a GitHub prerelease.
-4. Run fresh-install, update, rollback, persistence, and failure validation.
-5. Promote the existing GitHub Release to Stable only after the release gate
-   passes. Promotion does not change tags or assets.
+VirtizAI uses semantic versions. Published versions may be prereleases while they receive validation. Stable, beta, and other channels are selected through release metadata and update policy; a prerelease is never silently treated as Stable.
 
-## Update boundaries
+## Release flow
 
-The shared Update Manager validates and records release manifests, channel/pin
-policy, plans, and history. WebUI, Discord, and CLI call that same API.
+1. Prepare and review a clean commit.
+2. Create a new immutable `v<major>.<minor>.<patch>` tag.
+3. Build the native package and manifest from that tag.
+4. Publish the exact package, manifest, and SHA-256 checksum.
+5. Validate installation, upgrades, rollback, persistence, and failure recovery.
+6. Promote only after all required gates pass. Promotion never rewrites a tag or asset.
 
-VirtizAI Core does not receive Docker-socket or root permissions. A platform
-updater helper or external deployment mechanism applies a verified plan:
+## Verification and compatibility
 
-- Docker/Compose or Portainer performs image/container replacement.
-- Native Linux uses a narrow helper to install a verified `.deb`, manage
-  `virtizai.service`, and create/restore a VirtizAI-only backup.
+Manifests identify version, channel, artifact URL, SHA-256, target schema, minimum upgrade version, and rollback compatibility. The Update Manager verifies them before managed operations. Native installation uses a constrained privileged helper while the application remains unprivileged.
 
-## Reproducible Docker transition validation
+Schema-changing updates declare compatibility boundaries. Application-only rollback is refused when unsafe; supported data-restoring rollback validates backup path, checksum, metadata, and archive contents before replacing SQLite state. Docker/Compose owns container replacement. Unmanaged transitions are recorded as external updates without claiming a manager-created backup.
 
-On an isolated Docker validation host that has cloned this repository, run:
-
-```sh
-packaging/validate-compose-transition.sh 0.1.0 0.1.1
-```
-
-The script checks out the exact immutable tags, overrides legacy Compose build
-metadata without modifying either tag, waits for `/healthz` to return the expected
-version, verifies the OCI label, preserves named volumes across the full
-`0.1.0 -> 0.1.1 -> 0.1.0` sequence, and tears the deployment down afterward.
-
-## VM readiness
-
-Before the Docker validation script is invoked on VM 121, verify startup with:
-
-```sh
-cloud-init status --wait
-systemctl is-active ssh
-```
-
-This is the readiness gate used for the Phase 10 validation environment; no
-arbitrary timing delay is required.
-
-## Phase 11 boundary
-
-Publishing GHCR images, signed provenance/attestations, generic Linux archives,
-and automated release promotion are Phase 11 pipeline work. They remain required
-before any candidate is promoted to Stable.
+See [DEPLOYMENT.md](DEPLOYMENT.md) and [docs/development.md](docs/development.md).

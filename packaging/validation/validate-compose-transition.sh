@@ -9,6 +9,7 @@ fi
 
 base_tag=$1
 target_tag=$2
+base_url=${VIRTIZAI_BASE_URL:-http://127.0.0.1:8766}
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 override=$(mktemp)
 
@@ -29,7 +30,7 @@ EOF
 
 wait_for_health() {
     expected_version=$1
-    EXPECTED_VERSION="$expected_version" python3 - <<'PY'
+    VIRTIZAI_BASE_URL="$base_url" EXPECTED_VERSION="$expected_version" python3 - <<'PY'
 import json
 import os
 import time
@@ -40,7 +41,7 @@ expected = os.environ["EXPECTED_VERSION"]
 deadline = time.monotonic() + 60
 while time.monotonic() < deadline:
     try:
-        with urlopen("http://127.0.0.1:8766/healthz", timeout=3) as response:
+        with urlopen(os.environ["VIRTIZAI_BASE_URL"].rstrip("/") + "/healthz", timeout=3) as response:
             health = json.load(response)
         if health.get("status") == "ok" and health.get("version") == expected:
             print(json.dumps(health, sort_keys=True))

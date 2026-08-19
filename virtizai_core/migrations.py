@@ -585,7 +585,7 @@ def migration_10(connection: sqlite3.Connection) -> None:
 
 
 def migration_11(connection: sqlite3.Connection) -> None:
-    """Synthetic Phase 10 rollback fixture: schema-only state is incompatible with v10."""
+    """Synthetic schema-transition fixture: schema-only state is incompatible with v10."""
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS schema_transition_proof (

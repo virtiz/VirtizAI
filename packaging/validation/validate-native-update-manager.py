@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 parser = argparse.ArgumentParser()
+parser.add_argument("--base-url", default=os.environ.get("VIRTIZAI_BASE_URL", "http://127.0.0.1:8766"))
 parser.add_argument("--artifact", required=True)
 parser.add_argument("--sha256", required=True)
 parser.add_argument("--target-version", required=True)
@@ -23,7 +25,7 @@ payload = {"artifact_path": args.artifact, "sha256": args.sha256, "target_versio
 if args.target_schema is not None: payload["target_schema"] = args.target_schema
 if args.restore_data:
     payload.update({"restore_data": True, "backup_ref": args.backup_ref, "backup_sha256": args.backup_sha256})
-request = Request(f"http://127.0.0.1:8766/v1/updates/native/{args.operation}", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
+request = Request(f"{args.base_url.rstrip('/')}/v1/updates/native/{args.operation}", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
 try:
     with urlopen(request, timeout=180) as response:
         print(response.status)
@@ -36,7 +38,7 @@ if args.wait_health:
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         try:
-            with urlopen("http://127.0.0.1:8766/healthz", timeout=3) as response:
+            with urlopen(args.base_url.rstrip("/") + "/healthz", timeout=3) as response:
                 health = json.load(response)
             if health.get("version") == args.target_version and health.get("status") == "ok":
                 print(json.dumps(health, sort_keys=True))

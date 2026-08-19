@@ -1,5 +1,5 @@
 #!/bin/sh
-# Root-owned fixed runner for the constrained helper outside the core sandbox.
+# Root-owned fixed runner for the constrained helper outside the application sandbox.
 set -eu
 case "${1:-}" in backup|restore|install|rollback) ;; schedule-rollback) ;; *) exit 64;; esac
 if [ "${1:-}" = schedule-rollback ]; then

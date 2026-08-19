@@ -84,7 +84,7 @@ function wizardAction(action){if(action==='wizard-back'&&wizardStep>0){wizardSte
 async function loadReleasesView(){
   const data=await fetch('/v1/releases').then(response=>response.json());
   const releases=data.releases||[];
-  viewContent.innerHTML=`${heading('SYSTEM / RELEASES','Releases / Updates','Release metadata, policy, and history are shared by WebUI, Discord, and CLI. Privileged installs run outside VirtizAI Core.')}<section class="card"><div class="panel-heading"><h3>Update policy</h3><button id="check-updates" class="primary-button">Check updates <span>↥</span></button></div><p class="subtext">Channel: ${data.policy.channel} · Policy: ${data.policy.version_policy}${data.policy.pinned_version?` · Pinned: ${data.policy.pinned_version}`:''}</p><div id="release-plan" class="wizard-note">No update check has run.</div></section><section class="card" style="margin-top:16px"><div class="panel-heading"><h3>Known releases</h3></div>${releases.length?releases.map(item=>`<div class="table-row"><div>${item.version}</div><div>${item.channel}</div><div>${item.release_url}</div></div>`).join(''):'<p class="subtext">No release manifests imported yet.</p>'}</section>`;
+  viewContent.innerHTML=`${heading('SYSTEM / RELEASES','Releases / Updates','Release metadata, policy, and history are shared by WebUI, Discord, and CLI. Privileged installs run outside the application.')}<section class="card"><div class="panel-heading"><h3>Update policy</h3><button id="check-updates" class="primary-button">Check updates <span>↥</span></button></div><p class="subtext">Channel: ${data.policy.channel} · Policy: ${data.policy.version_policy}${data.policy.pinned_version?` · Pinned: ${data.policy.pinned_version}`:''}</p><div id="release-plan" class="wizard-note">No update check has run.</div></section><section class="card" style="margin-top:16px"><div class="panel-heading"><h3>Known releases</h3></div>${releases.length?releases.map(item=>`<div class="table-row"><div>${item.version}</div><div>${item.channel}</div><div>${item.release_url}</div></div>`).join(''):'<p class="subtext">No release manifests imported yet.</p>'}</section>`;
   document.querySelector('#check-updates').addEventListener('click',async()=>{const plan=await fetch('/v1/updates/plan?platform=debian-amd64').then(response=>response.json());document.querySelector('#release-plan').textContent=plan.available?`Verified update available: ${plan.release.version}. Apply it with the platform updater helper or your external deployment tool.`:'No verified update is available for this platform and policy.'});
 }
 const baseShowView=showView;
@@ -94,7 +94,7 @@ renderNav();showView('chat');
 if(new URLSearchParams(location.search).get('wizard')==='1')openWizard();
 fetch('/healthz').then(response=>response.ok?response.json():null).then(health=>{
   if(!health)return;
-  document.querySelectorAll('.build-tag').forEach(el=>el.textContent=`CORE ${health.version}`);
+  document.querySelectorAll('.build-tag').forEach(el=>el.textContent=`VirtizAI ${health.version}`);
   document.querySelectorAll('.wizard-foot').forEach(el=>el.innerHTML=`<span class="status-dot healthy"></span> Core ready · schema v${health.schema_version}`);
 }).catch(()=>{});
 

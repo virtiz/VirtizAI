@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Structured Phase 10 recovery/external-update validation.
+"""Structured recovery and external-update validation.
 
 The harness is target-agnostic: pass the guest API URL and database path (or
 only the API URL for remote guests). It records the API result, health, latest

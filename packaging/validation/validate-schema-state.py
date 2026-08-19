@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed, capture, and verify the Phase 10 synthetic schema transition state."""
+"""Seed, capture, and verify a synthetic schema transition state."""
 from __future__ import annotations
 import argparse
 import json

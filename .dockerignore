@@ -8,5 +8,4 @@ workspace
 .venv
 *.egg-info
 tests
-bench.py
-VIRTIZAI_PHASE_*.md
+benchmarks/bench.py
