@@ -135,6 +135,9 @@ jobs:
         run: |
           set -euo pipefail
           image="${{ inputs.publish_image && steps.version.outputs.image || format('virtizai:rehearsal-{0}-{1}', steps.version.outputs.version, github.sha) }}"
+          if [ "${{ inputs.publish_image }}" = true ]; then
+            docker pull "$image" >/dev/null
+          fi
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "${{ steps.version.outputs.version }}"
 
       - name: Generate release manifest and checksums
