@@ -49,13 +49,13 @@ jobs:
           echo "image=${IMAGE_NAME,,}:$tag_version" >> "$GITHUB_OUTPUT"
 
       - name: Run complete test suite
-        run: make test
+        run: python -m pytest -q tests
 
       - name: Build application and frontend assets
-        run: make build
+        run: python -m compileall -q virtizai_core tests webui benchmarks virtizai_cli.py
 
       - name: Build native package
-        run: make package
+        run: sh packaging/build-deb.sh
 
       - name: Verify native package version
         shell: bash
