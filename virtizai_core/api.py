@@ -192,6 +192,9 @@ class NativeUpdateRequest(BaseModel):
     artifact_path: str
     sha256: str
     target_version: str
+    backup_ref: str | None = None
+    backup_sha256: str | None = None
+    restore_data: bool = False
 
 
 class ExternalUpdateRecord(BaseModel):
@@ -307,6 +310,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/v1/updates/external")
+    async def record_external_update(request: ExternalUpdateRecord) -> dict:
+        schema = database.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")["version"]
+        update_id = app.state.update_coordinator.record_external(request.old_version, request.new_version, request.source, schema, request.health)
+        return {"id": update_id, "backup_created": False, "source": request.source}
+
     @app.post("/v1/updates/{action}")
     async def request_update(action: str, platform: str) -> dict:
         if action not in {"update", "rollback"}:
@@ -328,27 +337,30 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         action = "native_rollback" if operation == "rollback" else "native_update"
         update_id = app.state.updates.record(request.target_version, action, "started", request.artifact_path)
         try:
+            if operation == "rollback" and request.restore_data and (not request.backup_ref or not request.backup_sha256):
+                raise UpdateFailure("backup_required", "Data-restoring rollback requires a verified matching backup")
             artifact = Path(request.artifact_path)
             staging = app_config.data_dir / "staging"
             if artifact.parent != staging or artifact.suffix != ".deb":
                 raise UpdateFailure("artifact_path_denied", "Artifacts must be staged under the VirtizAI data directory")
             coordinator.verify_artifact(artifact, request.sha256)
             schema = database.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")["version"]
-            backup = coordinator.backup(update_id, app_config.app_version, request.target_version, schema)
-            result = coordinator.helper.run("install", str(artifact), request.sha256)
+            if operation == "rollback" and request.restore_data:
+                result = coordinator.helper.run("restore", request.backup_ref, request.backup_sha256)
+                backup = {"backup_ref": request.backup_ref, "checksum_sha256": request.backup_sha256, "verified": True, "restored": True, "schema_version": schema}
+            else:
+                backup = coordinator.backup(update_id, app_config.app_version, request.target_version, schema)
+                result = {}
+            result = {**result, **coordinator.helper.run("install", str(artifact), request.sha256)}
             database.execute("UPDATE update_history SET status='installed_pending_health', metadata_json=? WHERE id=?", (json.dumps({"backup": backup, "helper": result}), update_id))
             return {"id": update_id, "status": "installed_pending_health", "backup": backup}
-        except UpdateFailure as exc:
-            database.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps({"code": exc.code, "message": exc.message}), update_id))
-            raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message}) from exc
+        except (UpdateFailure, OSError) as exc:
+            code = exc.code if isinstance(exc, UpdateFailure) else "update_io_failed"
+            message = exc.message if isinstance(exc, UpdateFailure) else str(exc)
+            database.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps({"code": code, "message": message}), update_id))
+            raise HTTPException(status_code=400, detail={"code": code, "message": message}) from exc
         finally:
             coordinator.release()
-
-    @app.post("/v1/updates/external")
-    async def record_external_update(request: ExternalUpdateRecord) -> dict:
-        schema = database.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")["version"]
-        update_id = app.state.update_coordinator.record_external(request.old_version, request.new_version, request.source, schema, request.health)
-        return {"id": update_id, "backup_created": False, "source": request.source}
 
     @app.post("/v1/telemetry/prune")
     async def prune_telemetry() -> dict:

@@ -92,3 +92,13 @@ def test_update_backup_lock_checksum_and_external_record(tmp_path: Path) -> None
     metadata = json.loads(database.fetch_one("SELECT metadata_json FROM update_history WHERE id=?", (external,))["metadata_json"])
     assert metadata["backup_created"] is False
     database.close()
+
+
+def test_reconciler_refuses_schema_incompatible_pending_update(tmp_path: Path) -> None:
+    from virtizai_core.updates import StartupUpdateReconciler
+    database = Database(tmp_path / "state.db")
+    database.open()
+    database.execute("INSERT INTO update_history(id, version, action, status, metadata_json) VALUES ('bad', '0.1.0', 'native_update', 'installed_pending_health', ?)", (json.dumps({"backup": {"verified": True, "schema_version": 999}}),))
+    assert StartupUpdateReconciler(database).reconcile("0.1.0", 10) == 0
+    assert database.fetch_one("SELECT status FROM update_history WHERE id='bad'")["status"] == "failed"
+    database.close()
