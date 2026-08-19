@@ -38,3 +38,22 @@ class TransactionJournal:
         return records
     def remove(self, transaction_id: str) -> None:
         self.path(transaction_id).unlink(missing_ok=True)
+class StartupTransactionReconciler:
+    """Persist completed helper transactions into the database after restart."""
+    def __init__(self, database: Any, journal: TransactionJournal) -> None:
+        self.database = database
+        self.journal = journal
+    def reconcile(self, running_version: str, schema_version: int) -> int:
+        completed = 0
+        for transaction in self.journal.pending():
+            if transaction.get("stage") != "RESTART_PENDING":
+                continue
+            if transaction.get("target_version") != running_version or transaction.get("target_schema") != schema_version:
+                continue
+            metadata = {"transaction": transaction, "backup": transaction["backup"], "data_restore_required": True}
+            existing = self.database.fetch_one("SELECT id FROM update_history WHERE id=?", (transaction["transaction_id"],))
+            if existing is None:
+                self.database.execute("INSERT INTO update_history(id, version, action, status, release_ref, metadata_json) VALUES (?, ?, 'native_rollback', 'known_good', ?, ?)", (transaction["transaction_id"], running_version, transaction.get("artifact_path"), json.dumps(metadata, sort_keys=True)))
+            self.journal.remove(transaction["transaction_id"])
+            completed += 1
+        return completed
