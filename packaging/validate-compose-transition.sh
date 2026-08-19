@@ -10,11 +10,10 @@ fi
 base_tag=$1
 target_tag=$2
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-compose=${COMPOSE_COMMAND:-docker-compose}
 override=$(mktemp)
 
 cleanup() {
-    VIRTIZAI_VERSION="$base_tag" "$compose" -f "$root/compose.yaml" -f "$override" down >/dev/null 2>&1 || true
+    sudo env VIRTIZAI_VERSION="$base_tag" docker-compose -f "$root/compose.yaml" -f "$override" down >/dev/null 2>&1 || true
     rm -f "$override"
 }
 trap cleanup EXIT INT TERM
@@ -56,8 +55,8 @@ PY
 run_release() {
     version=$1
     git -C "$root" checkout --detach "v$version"
-    VIRTIZAI_VERSION="$version" "$compose" -f "$root/compose.yaml" -f "$override" up --build -d
-    image_version=$(docker image inspect "virtizai:$version" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')
+    sudo env VIRTIZAI_VERSION="$version" docker-compose -f "$root/compose.yaml" -f "$override" up --build -d
+    image_version=$(sudo docker image inspect "virtizai:$version" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')
     test "$image_version" = "$version"
     wait_for_health "$version"
 }
