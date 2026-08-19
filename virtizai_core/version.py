@@ -1,4 +1,4 @@
 """Single canonical VirtizAI semantic version."""
 
-__version__ = "0.1.37"
+__version__ = "0.1.38"
 MIN_MANAGED_ROLLBACK_VERSION = "0.1.28"
