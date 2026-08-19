@@ -111,21 +111,6 @@ async def test_managed_rollback_below_baseline_is_rejected_explicitly(tmp_path: 
     assert response.json()["detail"]["code"] == "unsupported_rollback_baseline"
 
 @pytest.mark.asyncio
-async def test_managed_rollback_below_baseline_is_rejected_explicitly(tmp_path: Path) -> None:
-    config = AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db")
-    app = create_app(config)
-    staging = config.data_dir / "staging"
-    staging.mkdir(parents=True)
-    artifact = staging / "candidate.deb"
-    artifact.write_text("candidate")
-    checksum = __import__('hashlib').sha256(artifact.read_bytes()).hexdigest()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post('/v1/updates/native/rollback', json={"artifact_path": str(artifact), "sha256": checksum, "target_version": "0.1.17", "target_schema": 10, "restore_data": True})
-    assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "unsupported_rollback_baseline"
-
-
-@pytest.mark.asyncio
 async def test_application_only_schema_downgrade_is_refused(tmp_path: Path) -> None:
     config = AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db")
     app = create_app(config)
