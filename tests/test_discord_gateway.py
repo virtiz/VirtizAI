@@ -86,3 +86,19 @@ async def test_gateway_uses_shared_adapter_session_and_sends_chunks(tmp_path: Pa
     assert await gateway.handle_message(message) is True
     assert calls == [("42", "hello", "guild:7:channel:0:user:42", "Owner")]
     assert message.channel.sent == ["reply"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_ignores_explicit_dev_bot_mention(tmp_path: Path, monkeypatch):
+    from types import SimpleNamespace
+    from virtizai_core.db import Database
+    db = Database(tmp_path / "state.db")
+    db.open()
+    db.execute("UPDATE discord_config SET enabled=1, allow_dms=0, require_mentions=0 WHERE id='discord-default'")
+    monkeypatch.setenv("VIRTIZAI_DISCORD_IGNORED_BOT_IDS", "1539768299389456465")
+    class Adapter:
+        async def handle_message(self, *args, **kwargs):
+            raise AssertionError("ignored mention must not reach the adapter")
+    message = SimpleNamespace(author=SimpleNamespace(bot=False, id=42), guild=SimpleNamespace(id=7), channel=SimpleNamespace(id=0), content="<@1539768299389456465> use dev")
+    gateway = DiscordGateway(Adapter(), db, FileSecretStore(tmp_path / "secrets.json"))
+    assert await gateway.handle_message(message) is False

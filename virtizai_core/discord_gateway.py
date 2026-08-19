@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -45,6 +47,7 @@ class DiscordGateway:
         self._stop = asyncio.Event()
         self._status = GatewayStatus("disabled")
         self._send_lock = asyncio.Lock()
+        self.ignored_bot_ids = {item.strip() for item in os.environ.get("VIRTIZAI_DISCORD_IGNORED_BOT_IDS", "").split(",") if item.strip()}
 
     @staticmethod
     def _list(row, field: str) -> set[str]:
@@ -144,6 +147,11 @@ class DiscordGateway:
 
     async def handle_message(self, message) -> bool:
         if getattr(message.author, "bot", False):
+            return False
+        raw_mentions = getattr(message, "raw_mentions", None)
+        if raw_mentions is None:
+            raw_mentions = [match.group(1) for match in re.finditer(r"<@!?(\d+)>", getattr(message, "content", ""))]
+        if self.ignored_bot_ids.intersection(str(item) for item in raw_mentions):
             return False
         guild = getattr(message, "guild", None)
         guild_id = str(guild.id) if guild else None
