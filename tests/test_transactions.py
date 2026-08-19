@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 import pytest
 from virtizai_core.transactions import TransactionJournal
@@ -48,3 +49,27 @@ def test_startup_reconciler_persists_and_clears_completed_transaction(tmp_path: 
     assert journal.pending() == []
     assert reconciler.reconcile("0.1.17", 10) == 0
     database.close()
+def test_inode_replacement_requires_external_journal(tmp_path: Path) -> None:
+    original = tmp_path / "state.db"
+    restored = tmp_path / "restored.db"
+    database = Database(original)
+    database.open()
+    database.execute("INSERT INTO app_meta(key, value) VALUES ('inode-test', 'old')")
+    database.connection.execute("PRAGMA wal_checkpoint(FULL)")
+    shutil.copy2(original, restored)
+    journal = TransactionJournal(tmp_path)
+    transaction = journal.create("native_rollback", target_version="0.1.17", target_schema=10, artifact_path="old.deb", backup={"backup_ref": "backup.tar.gz", "checksum_sha256": "b" * 64, "schema_version": 10}, data_restore_required=True)
+    transaction["stage"] = "RESTART_PENDING"
+    transaction["helper_result"] = {"transaction_id": transaction["transaction_id"], "success": True}
+    journal.write(transaction)
+    database.connection.execute("UPDATE app_meta SET value='old-inode-write' WHERE key='inode-test'")
+    database.close()
+    shutil.copy2(restored, original)
+    restarted = Database(original)
+    restarted.open()
+    assert restarted.fetch_one("SELECT value FROM app_meta WHERE key='inode-test'")["value"] == "old"
+    assert StartupTransactionReconciler(restarted, journal).reconcile("0.1.17", 10) == 1
+    row = restarted.fetch_one("SELECT metadata_json FROM update_history WHERE id=?", (transaction["transaction_id"],))
+    assert json.loads(row["metadata_json"])["data_restore_required"] is True
+    assert journal.pending() == []
+    restarted.close()

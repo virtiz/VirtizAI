@@ -68,4 +68,24 @@ install)
     printf '{"installed":true,"restart_scheduled":true}\n'
     ;;
 *) usage ;;
+rollback)
+    [ "$#" -eq 7 ] || usage
+    transaction_id=$1; archive=$2; expected_backup=$3; artifact=$4; expected_artifact=$5
+    case "$transaction_id" in *[!A-Za-z0-9-]*) exit 64;; esac
+    journal="$DATA_DIR/update-transactions/$transaction_id.json"
+    systemctl stop virtizai.service
+    actual=$(sha256sum "$archive" | awk '{print $1}'); [ "$actual" = "$expected_backup" ] || exit 65
+    temporary=$(mktemp -d); trap 'rm -rf "$temporary"' EXIT; tar -C "$temporary" -xzf "$archive"
+    database="$temporary/data/virtizai.db"; [ -f "$database" ] || database="$temporary/virtizai.db"; [ -f "$database" ] || exit 66
+    install -m 600 "$database" "$DATA_DIR/virtizai.db"; rm -f "$DATA_DIR/virtizai.db-wal" "$DATA_DIR/virtizai.db-shm"
+    if [ -d "$temporary/etc/virtizai" ]; then cp -a "$temporary/etc/virtizai/." "$CONFIG_DIR/"; fi
+    actual=$(sha256sum "$artifact" | awk '{print $1}'); [ "$actual" = "$expected_artifact" ] || exit 65
+    VIRTIZAI_MANAGED_UPDATE=1 DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades "$artifact"
+    python3 - "$journal" "$transaction_id" <<'PY'
+import json, os, sys
+p, tx = sys.argv[1:]; d=json.load(open(p)); d["stage"]="RESTART_PENDING"; d["helper_result"]={"transaction_id":tx,"success":True}; t=p+".tmp"; open(t,"w").write(json.dumps(d,sort_keys=True)+"\n"); os.replace(t,p)
+PY
+    systemctl start virtizai.service
+    printf '{"rollback":true,"restart_pending":true}\n'
+    ;;
 esac

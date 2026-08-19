@@ -28,6 +28,18 @@ class TransactionJournal:
         temporary = destination.with_name(destination.name + ".tmp")
         temporary.write_text(json.dumps(transaction, sort_keys=True) + "\n")
         os.replace(temporary, destination)
+    def record_helper_result(self, transaction_id: str, operation: str, success: bool, result: dict) -> dict:
+        transaction = self.read(transaction_id)
+        if transaction.get("operation") != operation:
+            raise ValueError("transaction operation mismatch")
+        if not isinstance(result, dict) or result.get("transaction_id") != transaction_id:
+            raise ValueError("helper result transaction mismatch")
+        if not success and not result.get("error"):
+            raise ValueError("failed helper result requires an error")
+        transaction["helper_result"] = result
+        transaction["stage"] = "RESTART_PENDING" if success else "FAILED"
+        self.write(transaction)
+        return transaction
     def read(self, transaction_id: str) -> dict[str, Any]:
         return json.loads(self.path(transaction_id).read_text())
     def pending(self) -> list[dict[str, Any]]:

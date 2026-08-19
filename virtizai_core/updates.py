@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from .transactions import TransactionJournal
 from .db import Database
 
 
@@ -55,6 +56,7 @@ class UpdateCoordinator:
         self.config_dir = config_dir
         self.helper = helper or NativeUpdateHelper()
         self._lock = threading.Lock()
+        self.journal = TransactionJournal(data_dir)
 
     def acquire(self) -> bool:
         return self._lock.acquire(blocking=False)
@@ -124,6 +126,9 @@ class UpdateCoordinator:
         if not isinstance(metadata.get("schema_version"), int):
             raise UpdateFailure("backup_invalid", "Rollback backup does not declare its schema version")
         return metadata
+    def update_transaction(self, update_id: str, source_version: str, source_schema: int, target_version: str, target_schema: int, backup: dict, artifact_path: str, artifact_sha256: str) -> dict:
+        transaction = self.journal.create("native_rollback", transaction_id=update_id, source_version=source_version, source_schema=source_schema, target_version=target_version, target_schema=target_schema, backup=backup, artifact_path=artifact_path, artifact_sha256=artifact_sha256, data_restore_required=True)
+        return transaction
 
     def record_external(self, old_version: str, new_version: str, source: str, schema_version: int, health: str) -> str:
         update_id = str(uuid.uuid4())

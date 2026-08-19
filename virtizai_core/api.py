@@ -36,6 +36,7 @@ from .costs import CostService
 from .retention import RetentionService
 from .interfaces import InterfaceRequest, InterfaceService
 from .discord import DiscordAdapter
+from .transactions import StartupTransactionReconciler
 from .updates import NativeUpdateHelper, StartupUpdateReconciler, UpdateCoordinator, UpdateFailure
 
 
@@ -231,6 +232,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.memory = MemoryService(database)
     app.state.updates = UpdateManager(database)
     app.state.update_coordinator = UpdateCoordinator(database, app_config.data_dir, helper=NativeUpdateHelper(os.environ.get("VIRTIZAI_UPDATE_HELPER")))
+    StartupTransactionReconciler(database, app.state.update_coordinator.journal).reconcile(app_config.app_version, schema_version)
     app.state.costs = CostService(database)
     app.state.retention = RetentionService(database)
     app.state.config = app_config
@@ -356,7 +358,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                 )
                 if registered is None or not registered["verified"]:
                     raise UpdateFailure("backup_unverified", "Rollback requires a manager-verified backup")
-                result = coordinator.helper.run("restore", request.backup_ref, request.backup_sha256)
+                transaction = coordinator.update_transaction(update_id, app_config.app_version, schema, request.target_version, metadata["schema_version"], backup, str(artifact), request.sha256)
+                database.close()
+                coordinator.helper.run("rollback", update_id, request.backup_ref, request.backup_sha256, str(artifact), request.sha256, request.target_version, str(metadata["schema_version"]))
+                return {"id": update_id, "status": "restart_pending", "transaction": transaction}
                 backup = {"backup_ref": request.backup_ref, "checksum_sha256": request.backup_sha256, "verified": True, "restored": True, "schema_version": metadata["schema_version"]}
             else:
                 backup = coordinator.backup(update_id, app_config.app_version, request.target_version, schema)
