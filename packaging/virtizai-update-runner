@@ -1,5 +1,19 @@
 #!/bin/sh
 # Root-owned fixed runner for the constrained helper outside the core sandbox.
 set -eu
-case "${1:-}" in backup|restore|install|rollback) ;; *) exit 64;; esac
+case "${1:-}" in backup|restore|install|rollback) ;; schedule-rollback) ;; *) exit 64;; esac
+if [ "${1:-}" = schedule-rollback ]; then
+    [ "$#" -eq 8 ] || exit 64
+    shift
+    transaction_id=$1; archive=$2; backup_sha256=$3; artifact=$4; artifact_sha256=$5; target_version=$6; target_schema=$7
+    case "$transaction_id" in *[!A-Za-z0-9-]*) exit 64;; esac
+    unit="virtizai-native-rollback-$transaction_id.service"
+    if systemctl show -p LoadState --value "$unit" 2>/dev/null | grep -q '^loaded$'; then
+        printf '{"scheduled":true,"already_present":true,"unit":"%s"}\n' "$unit"
+        exit 0
+    fi
+    systemd-run --unit="${unit%.service}" --no-block --collect --quiet --service-type=exec --property=NoNewPrivileges=false --property=ProtectSystem=false --property=PrivateTmp=false /usr/libexec/virtizai-update-helper rollback "$transaction_id" "$archive" "$backup_sha256" "$artifact" "$artifact_sha256" "$target_version" "$target_schema" >/dev/null
+    printf '{"scheduled":true,"unit":"%s"}\n' "$unit"
+    exit 0
+fi
 exec systemd-run --wait --collect --quiet --pipe --service-type=exec --property=NoNewPrivileges=false --property=ProtectSystem=false --property=PrivateTmp=false /usr/libexec/virtizai-update-helper "$@"

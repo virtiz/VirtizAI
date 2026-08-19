@@ -7,8 +7,8 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -331,7 +331,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         return {"id": update_id, "action": action, "status": "planned", "plan": plan, "privilege_boundary": "Use a platform updater helper or an external deployment tool to apply this verified plan."}
 
     @app.post("/v1/updates/native/{operation}")
-    async def apply_native_update(operation: str, request: NativeUpdateRequest) -> dict:
+    async def apply_native_update(operation: str, request: NativeUpdateRequest, background_tasks: BackgroundTasks) -> dict:
         if operation not in {"apply", "rollback"}:
             raise HTTPException(status_code=404, detail="Unknown native update operation")
         coordinator = app.state.update_coordinator
@@ -360,9 +360,11 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
                     raise UpdateFailure("backup_unverified", "Rollback requires a manager-verified backup")
                 backup = {"backup_ref": request.backup_ref, "checksum_sha256": request.backup_sha256, "verified": True, "restored": True, "schema_version": metadata["schema_version"]}
                 transaction = coordinator.update_transaction(update_id, app_config.app_version, schema, request.target_version, metadata["schema_version"], backup, str(artifact), request.sha256)
-                database.close()
-                coordinator.helper.run("rollback", update_id, request.backup_ref, request.backup_sha256, str(artifact), request.sha256, request.target_version, str(metadata["schema_version"]))
-                return {"id": update_id, "status": "restart_pending", "transaction": transaction}
+                def launch_detached_rollback() -> None:
+                    database.close()
+                    coordinator.helper.schedule_rollback(update_id, request.backup_ref, request.backup_sha256, str(artifact), request.sha256, request.target_version, metadata["schema_version"])
+                background_tasks.add_task(launch_detached_rollback)
+                return JSONResponse(status_code=202, content={"id": update_id, "status": "accepted", "transaction": transaction})
             else:
                 backup = coordinator.backup(update_id, app_config.app_version, request.target_version, schema)
                 result = {}

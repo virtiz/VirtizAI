@@ -36,7 +36,7 @@ class NativeUpdateHelper:
     def run(self, operation: str, *arguments: str) -> dict:
         if not self.executable:
             raise UpdateFailure("helper_unconfigured", "No native updater helper is configured")
-        if operation not in {"backup", "restore", "install", "rollback"}:
+        if operation not in {"backup", "restore", "install", "rollback", "schedule-rollback"}:
             raise UpdateFailure("helper_operation_denied", "Unsupported helper operation")
         result = subprocess.run([*shlex.split(self.executable), operation, *arguments], check=False, capture_output=True, text=True, timeout=300)
         if result.returncode:
@@ -45,6 +45,10 @@ class NativeUpdateHelper:
             if line.startswith("{"):
                 return json.loads(line)
         raise UpdateFailure("helper_invalid_response", "Native helper did not return structured JSON")
+
+    def schedule_rollback(self, transaction_id: str, archive: str, backup_sha256: str, artifact: str, artifact_sha256: str, target_version: str, target_schema: int) -> dict:
+        """Launch the fixed runner in a transient unit outside virtizai.service."""
+        return self.run("schedule-rollback", transaction_id, archive, backup_sha256, artifact, artifact_sha256, target_version, str(target_schema))
 
 
 class UpdateCoordinator:
