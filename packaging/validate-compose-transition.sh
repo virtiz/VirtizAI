@@ -45,7 +45,7 @@ while time.monotonic() < deadline:
         if health.get("status") == "ok" and health.get("version") == expected:
             print(json.dumps(health, sort_keys=True))
             raise SystemExit(0)
-    except (URLError, TimeoutError, ValueError):
+    except (OSError, URLError, TimeoutError, ValueError):
         pass
     time.sleep(0.25)
 raise SystemExit(f"VirtizAI did not become healthy as {expected} within 60 seconds")
