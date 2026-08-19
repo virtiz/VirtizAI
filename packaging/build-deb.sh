@@ -44,7 +44,7 @@ python3 -m venv /usr/lib/virtizai/venv
 chown -R virtizai:virtizai /var/lib/virtizai /var/log/virtizai /etc/virtizai
 systemctl daemon-reload
 systemctl enable virtizai.service
-systemctl restart virtizai.service || true
+if [ "${VIRTIZAI_MANAGED_UPDATE:-0}" != "1" ]; then systemctl restart virtizai.service || true; fi
 EOF
 chmod 755 "$PKG/DEBIAN/postinst"
 cat > "$PKG/DEBIAN/prerm" <<'EOF'
