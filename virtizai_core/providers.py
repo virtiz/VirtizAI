@@ -54,7 +54,7 @@ class ProviderRegistry:
         if adapter_type == "ollama":
             if not endpoint:
                 raise ValueError("Ollama providers require an endpoint")
-            return OllamaAdapter(endpoint, float(config.get("timeout_seconds", 20)))
+            return OllamaAdapter(endpoint, float(config.get("timeout_seconds", 20)), config.get("chat_options"))
         raise ValueError(f"Unsupported adapter type: {adapter_type}")
 
     def adapter_for(self, provider_id: str) -> ProviderAdapter:

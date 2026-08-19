@@ -61,12 +61,13 @@ class OllamaAdapter:
 
     capabilities = ("health", "list_models", "model_metadata", "chat")
 
-    def __init__(self, endpoint: str, timeout_seconds: float = 20.0) -> None:
+    def __init__(self, endpoint: str, timeout_seconds: float = 20.0, chat_options: dict[str, Any] | None = None) -> None:
         normalized = endpoint.rstrip("/")
         if normalized.endswith("/v1"):
             normalized = normalized[:-3]
         self.endpoint = normalized
         self.timeout_seconds = timeout_seconds
+        self.chat_options = dict(chat_options or {})
 
     def _request(self, path: str, payload: dict | None = None) -> dict:
         data = None if payload is None else json.dumps(payload).encode()
@@ -117,10 +118,13 @@ class OllamaAdapter:
 
     async def chat(self, messages: list[dict[str, str]], model_name: str, max_tokens: int | None = None) -> InferenceResponse:
         started = time.perf_counter()
+        options = dict(self.chat_options)
+        if max_tokens:
+            options["num_predict"] = max_tokens
         payload = await asyncio.to_thread(
             self._request,
             "/api/chat",
-            {"model": model_name, "messages": messages, "stream": False, **({"options": {"num_predict": max_tokens}} if max_tokens else {})},
+            {"model": model_name, "messages": messages, "stream": False, **({"options": options} if options else {})},
         )
         latency_ms = (time.perf_counter() - started) * 1000
         message = payload.get("message", {})
