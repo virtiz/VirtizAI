@@ -8,11 +8,12 @@ from virtizai_core.db import Database
 from virtizai_core.transactions import StartupTransactionReconciler
 
 def test_native_helper_supported_operations_are_reachable() -> None:
-    helper = Path(__file__).parents[1] / "packaging" / "virtizai-update-helper"
-    text = helper.read_text()
-    labels = re.findall(r"^([a-z]+)\)", text, re.MULTILINE)
-    assert {"backup", "restore", "install", "rollback"}.issubset(labels)
-    assert labels.index("rollback") < text.index("*) usage")
+    root = Path(__file__).parents[1] / "packaging"
+    helper = (root / "virtizai-update-helper").read_text()
+    assert {"backup", "restore", "install", "rollback"}.issubset(re.findall(r"^([a-z]+)\)", helper, re.MULTILINE))
+    assert helper.index("rollback)") < helper.index("*) usage")
+    runner = (root / "virtizai-update-runner").read_text()
+    assert "backup|restore|install|rollback" in runner
 
 def test_transaction_journal_atomic_lifecycle(tmp_path: Path) -> None:
     journal = TransactionJournal(tmp_path)
