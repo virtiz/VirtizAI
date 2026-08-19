@@ -318,12 +318,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         update_id = app.state.updates.record(version, action, "planned", plan.get("artifact", {}).get("url"))
         return {"id": update_id, "action": action, "status": "planned", "plan": plan, "privilege_boundary": "Use a platform updater helper or an external deployment tool to apply this verified plan."}
 
-    @app.post("/v1/updates/native/apply")
-    async def apply_native_update(request: NativeUpdateRequest) -> dict:
+    @app.post("/v1/updates/native/{operation}")
+    async def apply_native_update(operation: str, request: NativeUpdateRequest) -> dict:
+        if operation not in {"apply", "rollback"}:
+            raise HTTPException(status_code=404, detail="Unknown native update operation")
         coordinator = app.state.update_coordinator
         if not coordinator.acquire():
             raise HTTPException(status_code=409, detail="An update or rollback is already in progress")
-        update_id = app.state.updates.record(request.target_version, "native_update", "started", request.artifact_path)
+        action = "native_rollback" if operation == "rollback" else "native_update"
+        update_id = app.state.updates.record(request.target_version, action, "started", request.artifact_path)
         try:
             artifact = Path(request.artifact_path)
             staging = app_config.data_dir / "staging"

@@ -48,7 +48,7 @@ async def test_session_ownership_and_discord_config_redaction(tmp_path: Path) ->
 async def test_release_api_plans_verified_updates(tmp_path: Path) -> None:
     app = create_app(AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db"))
     manifest = {
-        "version": "0.1.17", "channel": "stable", "release_url": "https://example.invalid/releases/v0.1.17",
+        "version": "0.1.18", "channel": "stable", "release_url": "https://example.invalid/releases/v0.1.18",
         "artifacts": [{"platform": "debian-amd64", "url": "https://example.invalid/virtizai.deb", "sha256": "b" * 64}],
         "schema_compatibility": {"minimum": 1, "maximum": 10},
         "rollback_compatibility": {"supported": True, "requires_data_restore": False},
@@ -67,7 +67,15 @@ async def test_release_api_plans_verified_updates(tmp_path: Path) -> None:
 async def test_startup_marks_matching_pending_update_known_good(tmp_path: Path) -> None:
     config = AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db")
     app = create_app(config)
-    app.state.database.execute("INSERT INTO update_history(id, version, action, status, metadata_json) VALUES ('pending', '0.1.16', 'native_update', 'installed_pending_health', ?)", (json.dumps({"backup": {"verified": True, "schema_version": 10}}),))
+    app.state.database.execute("INSERT INTO update_history(id, version, action, status, metadata_json) VALUES ('pending', '0.1.17', 'native_update', 'installed_pending_health', ?)", (json.dumps({"backup": {"verified": True, "schema_version": 10}}),))
     restarted = create_app(config)
     assert restarted
     assert app.state.database.fetch_one("SELECT status FROM update_history WHERE id='pending'")["status"] == "known_good"
+
+
+@pytest.mark.asyncio
+async def test_native_update_rejects_unknown_operation(tmp_path: Path) -> None:
+    app = create_app(AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post('/v1/updates/native/unknown', json={"artifact_path":"/tmp/a.deb", "sha256":"0" * 64, "target_version":"0.1.0"})
+    assert response.status_code == 404
