@@ -1,0 +1,215 @@
+name: Release build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version to build; empty derives v<version> from the ref"
+        required: false
+        type: string
+        default: ""
+      allow_version_override:
+        description: "Allow rehearsal to replace the checkout version in the working copy"
+        required: false
+        type: boolean
+        default: false
+      publish_image:
+        description: "Publish the versioned image to GHCR"
+        required: false
+        type: boolean
+        default: false
+      publish_release:
+        description: "Create the GitHub Release and attest published subjects"
+        required: false
+        type: boolean
+        default: false
+      upload_artifacts:
+        description: "Upload rehearsal artifacts to the Actions run"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: Build and validate release
+    runs-on: ubuntu-latest
+    env:
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/virtizai
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Resolve and validate version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          ALLOW_VERSION_OVERRIDE: ${{ inputs.allow_version_override }}
+        run: |
+          set -euo pipefail
+          version="$REQUESTED_VERSION"
+          if [ -z "$version" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          case "$version" in
+            ''|*[!0-9.]*|*.*.*.*) echo "invalid semantic version: $version" >&2; exit 1 ;;
+          esac
+          source_version="$(python -c 'from virtizai_core.version import __version__; print(__version__)')"
+          if [ "$source_version" != "$version" ]; then
+            if [ "$ALLOW_VERSION_OVERRIDE" != true ]; then
+              echo "tag/source version mismatch: $version vs $source_version" >&2
+              exit 1
+            fi
+            python packaging/set-version.py "$version"
+            source_version="$(python -c 'from virtizai_core.version import __version__; print(__version__)')"
+          fi
+          test "$source_version" = "$version"
+          channel=stable
+          if [ "${{ inputs.publish_release }}" != true ]; then channel=beta; fi
+          case "$version" in *-*) channel=beta ;; esac
+          image="${IMAGE_NAME,,}:$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "source_version=$source_version" >> "$GITHUB_OUTPUT"
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e '.[test]'
+
+      - name: Run complete test suite
+        shell: bash
+        run: python -m pytest -q tests
+
+      - name: Build application and frontend assets
+        run: python -m compileall -q virtizai_core tests webui benchmarks virtizai_cli.py
+
+      - name: Build native package
+        run: sh packaging/build-deb.sh
+
+      - name: Validate native package and version consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="dist/virtizai_${{ steps.version.outputs.version }}_amd64.deb"
+          test "$(dpkg-deb -f "$deb" Package)" = virtizai
+          test "$(dpkg-deb -f "$deb" Version)" = "${{ steps.version.outputs.version }}"
+
+      - name: Log in to GHCR
+        if: inputs.publish_image
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build container
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ inputs.publish_image }}
+          load: ${{ !inputs.publish_image }}
+          tags: ${{ inputs.publish_image && steps.version.outputs.image || format('virtizai:rehearsal-{0}-{1}', steps.version.outputs.version, github.sha) }}
+          build-args: |
+            VIRTIZAI_VERSION=${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+          provenance: false
+          sbom: false
+
+      - name: Validate container metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${{ inputs.publish_image && steps.version.outputs.image || format('virtizai:rehearsal-{0}-{1}', steps.version.outputs.version, github.sha) }}"
+          test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "${{ steps.version.outputs.version }}"
+
+      - name: Generate release manifest and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="dist/virtizai_${{ steps.version.outputs.version }}_amd64.deb"
+          if [ "${{ inputs.publish_release }}" = true ]; then
+            release_url="${{ github.server_url }}/${{ github.repository }}/releases/tag/${GITHUB_REF_NAME}"
+            provenance=github-actions
+          else
+            release_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            provenance=rehearsal-not-published
+          fi
+          python packaging/generate-release-manifest.py \
+            --version "${{ steps.version.outputs.version }}" \
+            --channel "${{ steps.version.outputs.channel }}" \
+            --release-url "$release_url" \
+            --deb "$deb" \
+            --output dist/release-manifest.json \
+            --target-schema "$(python -c 'from virtizai_core.migrations import MIGRATIONS; print(MIGRATIONS[-1][0])')" \
+            --minimum-upgrade-version "$(python -c 'from virtizai_core.version import MIN_MANAGED_ROLLBACK_VERSION; print(MIN_MANAGED_ROLLBACK_VERSION)')" \
+            --minimum-managed-rollback-version "$(python -c 'from virtizai_core.version import MIN_MANAGED_ROLLBACK_VERSION; print(MIN_MANAGED_ROLLBACK_VERSION)')" \
+            --rollback-baseline "$(python -c 'from virtizai_core.version import MIN_MANAGED_ROLLBACK_VERSION; print(MIN_MANAGED_ROLLBACK_VERSION)')" \
+            --rollback-requires-data-restore \
+            --source-commit "${GITHUB_SHA}" \
+            --container-image "${{ inputs.publish_image && steps.version.outputs.image || format('virtizai:rehearsal-{0}-{1}', steps.version.outputs.version, github.sha) }}" \
+            --container-digest "${{ steps.image.outputs.digest }}" \
+            --provenance "$provenance"
+          sha256sum "$deb" dist/release-manifest.json > dist/SHA256SUMS
+          python -m json.tool dist/release-manifest.json >/dev/null
+          test "$(python -c 'import json; print(json.load(open("dist/release-manifest.json"))["version"])')" = "${{ steps.version.outputs.version }}"
+
+      - name: Attest canonical container image
+        if: inputs.publish_release
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/virtizai
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest native package
+        if: inputs.publish_release
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/virtizai_${{ steps.version.outputs.version }}_amd64.deb
+
+      - name: Attest release manifest
+        if: inputs.publish_release
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/release-manifest.json
+
+      - name: Upload rehearsal artifacts
+        if: inputs.upload_artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtizai-rehearsal-${{ steps.version.outputs.version }}-${{ github.run_id }}
+          if-no-files-found: error
+          path: |
+            dist/virtizai_${{ steps.version.outputs.version }}_amd64.deb
+            dist/virtizai_${{ steps.version.outputs.version }}_amd64.deb.sha256
+            dist/release-manifest.json
+            dist/SHA256SUMS
+
+      - name: Publish GitHub Release
+        if: inputs.publish_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--title "VirtizAI ${{ steps.version.outputs.version }}" --generate-notes)
+          if [ "${{ steps.version.outputs.channel }}" != stable ]; then args+=(--prerelease); fi
+          gh release create "${GITHUB_REF_NAME}" "${args[@]}" \
+            "dist/virtizai_${{ steps.version.outputs.version }}_amd64.deb" \
+            dist/release-manifest.json \
+            dist/SHA256SUMS

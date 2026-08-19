@@ -1,0 +1,23 @@
+name: Release rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Candidate version to rehearse"
+        required: true
+        default: "0.1.34"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    uses: ./.github/workflows/release-build.yml
+    with:
+      version: ${{ inputs.version }}
+      allow_version_override: true
+      publish_image: false
+      publish_release: false
+      upload_artifacts: true
