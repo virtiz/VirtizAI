@@ -50,7 +50,7 @@ chmod 755 "$PKG/DEBIAN/postinst"
 cat > "$PKG/DEBIAN/prerm" <<'EOF'
 #!/bin/sh
 set -eu
-systemctl stop virtizai.service || true
+if [ "${VIRTIZAI_MANAGED_UPDATE:-0}" != "1" ]; then systemctl stop virtizai.service || true; fi
 EOF
 chmod 755 "$PKG/DEBIAN/prerm"
 mkdir -p "$OUT"
