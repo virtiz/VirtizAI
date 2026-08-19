@@ -12,6 +12,7 @@ VirtizAI is a self-hosted AI orchestration platform for conversations, tools, pr
 - SQLite/WAL durable state with versioned migrations
 - Verified updates, known-good promotion, rollback, and failure recovery
 - Docker Compose and native Debian/Ubuntu packaging
+- Versioned GHCR images and checksum-bound GitHub Releases
 
 Local providers can handle private workloads while cloud providers remain available when explicitly configured. Secrets are referenced through the secret-store boundary rather than stored as ordinary product data.
 

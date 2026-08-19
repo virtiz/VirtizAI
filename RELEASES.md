@@ -6,6 +6,12 @@ Git tags and published assets are immutable. Each release is built from its exac
 
 VirtizAI uses semantic versions. Published versions may be prereleases while they receive validation. Stable, beta, and other channels are selected through release metadata and update policy; a prerelease is never silently treated as Stable.
 
+## Automated release pipeline
+
+Pull requests and changes to `main` run the full test suite, application/package build, package metadata checks, and a non-publishing container build.
+
+Pushing a new immutable `v<version>` tag starts the release workflow. Only the tag workflow has package/image publishing permissions. It validates that the tag exactly matches the application version, builds the `.deb` and container from that commit, publishes the container to GHCR, generates the machine-readable manifest and checksums, creates GitHub provenance attestations, and attaches the artifacts to the GitHub Release. Forks and pull requests cannot access release credentials.
+
 ## Release flow
 
 1. Prepare and review a clean commit.
@@ -21,4 +27,4 @@ Manifests identify version, channel, artifact URL, SHA-256, target schema, minim
 
 Schema-changing updates declare compatibility boundaries. Application-only rollback is refused when unsafe; supported data-restoring rollback validates backup path, checksum, metadata, and archive contents before replacing SQLite state. Docker/Compose owns container replacement. Unmanaged transitions are recorded as external updates without claiming a manager-created backup.
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) and [docs/development.md](docs/development.md).
+GitHub Releases and GHCR remain authoritative; a website is optional and never participates in installation or update discovery. See [DEPLOYMENT.md](DEPLOYMENT.md) and [docs/development.md](docs/development.md).
