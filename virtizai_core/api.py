@@ -216,7 +216,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.jobs = jobs
     app.state.core = core
     app.state.interfaces = InterfaceService(database, core)
-    app.state.discord = DiscordAdapter(app.state.interfaces)
+    app.state.discord = DiscordAdapter(app.state.interfaces, app.state.updates)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):

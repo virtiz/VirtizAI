@@ -35,6 +35,7 @@ async def test_session_ownership_and_discord_config_redaction(tmp_path: Path) ->
         assert config['bot_secret_configured'] is True
         assert 'secret-ref' not in str(config)
         assert (await client.get('/v1/discord/command/status', params={'user_id':'guest'})).json()['status'] == 'ok'
+        assert 'releases' in (await client.get('/v1/discord/command/releases', params={'user_id':'guest'})).json()
         assert (await client.get('/v1/discord/command/update', params={'user_id':'guest'})).json()['error'] == 'permission_denied'
 
 

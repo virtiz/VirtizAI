@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .interfaces import InterfaceRequest, InterfaceService
+from .registries import UpdateManager
 
 
 @dataclass(frozen=True)
@@ -15,8 +16,9 @@ class DiscordReply:
 class DiscordAdapter:
     """In-process adapter; transport integration is optional and injectable."""
 
-    def __init__(self, interfaces: InterfaceService) -> None:
+    def __init__(self, interfaces: InterfaceService, updates: UpdateManager) -> None:
         self.interfaces = interfaces
+        self.updates = updates
 
     async def handle_message(self, user_id: str, content: str, session_key: str | None = None, session_id: str | None = None, display_name: str = "Discord user") -> DiscordReply:
         session_id, response = await self.interfaces.handle(InterfaceRequest("discord", user_id, content, session_key=session_key, session_id=session_id, display_name=display_name))
@@ -42,5 +44,9 @@ class DiscordAdapter:
         if command == "jobs":
             return {"jobs": [dict(row) for row in self.interfaces.database.fetch_all("SELECT id,status,kind,created_at FROM jobs ORDER BY created_at DESC LIMIT 20") ]}
         if command == "releases":
-            return {"releases": []}
+            return {
+                "releases": self.updates.releases(),
+                "policy": self.updates.policy(),
+                "history": self.updates.history(),
+            }
         return {"error": "unknown_command"}
