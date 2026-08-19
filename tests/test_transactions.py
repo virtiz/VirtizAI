@@ -37,6 +37,8 @@ def test_startup_reconciler_persists_and_clears_completed_transaction(tmp_path: 
     transaction = journal.create("native_rollback", target_version="0.1.17", target_schema=10, artifact_path="/var/lib/virtizai/staging/old.deb", backup={"backup_ref": "/var/lib/virtizai/backups/t.tar.gz", "checksum_sha256": "a" * 64, "schema_version": 10}, data_restore_required=True)
     transaction["stage"] = "RESTART_PENDING"
     journal.write(transaction)
+    transaction["helper_result"] = {"transaction_id": transaction["transaction_id"], "success": True}
+    journal.write(transaction)
     reconciler = StartupTransactionReconciler(database, journal)
     assert reconciler.reconcile("0.1.17", 10) == 1
     row = database.fetch_one("SELECT version, status, metadata_json FROM update_history WHERE id=?", (transaction["transaction_id"],))

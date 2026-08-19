@@ -46,9 +46,12 @@ class StartupTransactionReconciler:
     def reconcile(self, running_version: str, schema_version: int) -> int:
         completed = 0
         for transaction in self.journal.pending():
-            if transaction.get("stage") != "RESTART_PENDING":
+            helper = transaction.get("helper_result", {})
+            if transaction.get("stage") != "RESTART_PENDING" or transaction.get("operation") != "native_rollback":
                 continue
-            if transaction.get("target_version") != running_version or transaction.get("target_schema") != schema_version:
+            if not helper.get("success") or helper.get("transaction_id") != transaction.get("transaction_id"):
+                continue
+            if transaction.get("target_version") != running_version or transaction.get("target_schema") != schema_version or transaction.get("data_restore_required") is not True:
                 continue
             metadata = {"transaction": transaction, "backup": transaction["backup"], "data_restore_required": True}
             existing = self.database.fetch_one("SELECT id FROM update_history WHERE id=?", (transaction["transaction_id"],))
@@ -57,3 +60,16 @@ class StartupTransactionReconciler:
             self.journal.remove(transaction["transaction_id"])
             completed += 1
         return completed
+    def record_helper_result(self, transaction_id: str, operation: str, success: bool, result: dict) -> dict:
+        """Advance one existing transaction using only constrained helper fields."""
+        transaction = self.read(transaction_id)
+        if transaction.get("operation") != operation:
+            raise ValueError("transaction operation mismatch")
+        if not isinstance(result, dict) or result.get("transaction_id") != transaction_id:
+            raise ValueError("helper result transaction mismatch")
+        if not success and not result.get("error"):
+            raise ValueError("failed helper result requires an error")
+        transaction["helper_result"] = result
+        transaction["stage"] = "RESTART_PENDING" if success else "FAILED"
+        self.write(transaction)
+        return transaction
