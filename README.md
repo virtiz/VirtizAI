@@ -41,6 +41,6 @@ Architecture and contribution guidance is in [docs/development.md](docs/developm
 
 VirtizAI is an early, actively developed 0.1 release. The application, interfaces, provider routing, persistence, execution controls, packaging, and update/recovery workflows are implemented and covered by automated tests. APIs and deployment configuration may evolve before a stable 1.0 release.
 
-## Contributing and security
+## License, contributing, and security
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before changes. Report security issues privately using [SECURITY.md](SECURITY.md). A project license remains an owner decision and is not declared here.
+VirtizAI is licensed under the [Apache License 2.0](LICENSE). Read [CONTRIBUTING.md](CONTRIBUTING.md) before changes. Report security issues privately using [SECURITY.md](SECURITY.md).

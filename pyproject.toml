@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "virtizai"
 dynamic = ["version"]
 description = "Self-hosted AI orchestration platform"
+license = {file = "LICENSE"}
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
