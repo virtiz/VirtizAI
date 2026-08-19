@@ -103,3 +103,23 @@ class UpdateCoordinator:
             (update_id, new_version, health, source, json.dumps({"old_version": old_version, "new_version": new_version, "source": source, "schema_version": schema_version, "backup_created": False})),
         )
         return update_id
+
+
+class StartupUpdateReconciler:
+    """Finalizes only updates that survived restart with the expected schema."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def reconcile(self, running_version: str, schema_version: int) -> int:
+        rows = self.database.fetch_all("SELECT id, metadata_json FROM update_history WHERE status='installed_pending_health' AND version=?", (running_version,))
+        completed = 0
+        for row in rows:
+            metadata = json.loads(row["metadata_json"] or "{}")
+            backup = metadata.get("backup", {})
+            if not backup.get("verified") or backup.get("schema_version") != schema_version:
+                self.database.execute("UPDATE update_history SET status='failed', metadata_json=? WHERE id=?", (json.dumps({**metadata, "code": "startup_reconciliation_failed"}), row["id"]))
+                continue
+            self.database.execute("UPDATE update_history SET status='known_good' WHERE id=?", (row["id"],))
+            completed += 1
+        return completed

@@ -36,7 +36,7 @@ from .costs import CostService
 from .retention import RetentionService
 from .interfaces import InterfaceRequest, InterfaceService
 from .discord import DiscordAdapter
-from .updates import NativeUpdateHelper, UpdateCoordinator, UpdateFailure
+from .updates import NativeUpdateHelper, StartupUpdateReconciler, UpdateCoordinator, UpdateFailure
 
 
 class SessionCreate(BaseModel):
@@ -209,6 +209,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=webui_dir), name="static")
     database = Database(app_config.database_path)
     database.open()
+    schema_version = database.fetch_one("SELECT MAX(version) AS version FROM schema_migrations")["version"]
+    StartupUpdateReconciler(database).reconcile(app_config.app_version, schema_version)
     telemetry = TelemetryService(database)
     jobs = JobManager(database)
     providers = ProviderRegistry(database)
@@ -247,7 +249,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         schema_version = database.fetch_one(
             "SELECT MAX(version) AS version FROM schema_migrations"
         )["version"]
-        database.execute("UPDATE update_history SET status='known_good' WHERE status='installed_pending_health' AND version=?", (app_config.app_version,))
         return {
             "status": "ok",
             "application": "VirtizAI",
