@@ -21,6 +21,7 @@ VIRTIZAI_HOST=127.0.0.1
 VIRTIZAI_PORT=8766
 VIRTIZAI_UPDATE_HELPER=sudo /usr/libexec/virtizai-update-runner
 EOF
+if [ -n "${VIRTIZAI_SCHEMA_CEILING:-}" ]; then printf 'VIRTIZAI_SCHEMA_CEILING=%s\n' "$VIRTIZAI_SCHEMA_CEILING" >> "$PKG/etc/virtizai/virtizai.env"; fi
 cp "$ROOT/packaging/systemd/virtizai.service" "$PKG/libvirtizai.service.tmp"
 mkdir -p "$PKG/lib/systemd/system"
 mv "$PKG/libvirtizai.service.tmp" "$PKG/lib/systemd/system/virtizai.service"

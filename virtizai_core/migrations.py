@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import os
 from collections.abc import Callable
 
 Migration = Callable[[sqlite3.Connection], None]
@@ -625,7 +626,10 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
     current = connection.execute(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
     ).fetchone()[0]
+    ceiling = int(os.environ.get("VIRTIZAI_SCHEMA_CEILING", "2147483647"))
     for version, migration in MIGRATIONS:
+        if version > ceiling:
+            break
         if version <= current:
             continue
         migration(connection)
