@@ -189,7 +189,7 @@ class DiscordGateway:
         summary = result.get("summary") or result.get("message") or result.get("reason") or status
         content = f"Codex worker {status}: {str(summary)[:1800]}"
         if session_id:
-            self.adapter.interfaces.core.sessions.add_message(session_id, "assistant", content, {"route_id": "codex-worker"})
+            self.adapter.interfaces.core.sessions.add_message(session_id, "assistant", content, {"execution_type": "worker", "role": "codex_worker", "worker": "Codex CLI worker", "job_id": job.get("id"), "route_id": "codex-worker", "task_class": "hard"})
         if self.client and thread_id:
             channel = self.client.get_channel(int(thread_id))
             if channel:

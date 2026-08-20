@@ -645,6 +645,13 @@ def migration_13(connection: sqlite3.Connection) -> None:
     """)
 
 
+def migration_14(connection: sqlite3.Connection) -> None:
+    """Persist execution identity and routing metadata on each message."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
+    if "metadata_json" not in columns:
+        connection.execute("ALTER TABLE messages ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
+
+
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -659,6 +666,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (11, migration_11),
     (12, migration_12),
     (13, migration_13),
+    (14, migration_14),
 )
 
 

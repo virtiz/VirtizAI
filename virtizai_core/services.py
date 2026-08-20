@@ -46,6 +46,8 @@ class IntrospectionService:
         "current routing", "routing configuration", "what model", "what providers",
         "secretary model", "fallback model", "what workers", "codex connected",
         "provider configuration", "configured providers", "why are the local models", "currently offline", "did anything go down", "which one is your secretary fallback", "what was the primary model",
+        "which model is responding", "what model answered", "what provider handled", "was that local or cloud",
+        "did you use a fallback", "why did you use phi", "did qwen fail", "which agent answered", "what handled the last request",
         "which models are healthy", "why did you fall back", "why can't you use",
         "which providers are down", "status of the medium route", "why are models unavailable",
     )
@@ -104,7 +106,53 @@ class IntrospectionService:
         result["routes"]["hard_fallback"] = [{"provider": "NeuralWatt", "status": "configured" if any(p["name"] == "NeuralWatt" for p in result["providers"]) else "not configured"}]
         return result
 
-    def render(self) -> str:
+    def _last_inference(self, session_id: str | None) -> dict | None:
+        if not session_id:
+            return None
+        row = self.database.fetch_one("SELECT provider_id, model_id, metadata_json, created_at FROM messages WHERE session_id=? AND role='assistant' ORDER BY rowid DESC LIMIT 50", (session_id,))
+        if row is None:
+            return None
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        if metadata.get("execution_type") not in {"inference", "worker"}:
+            return self._last_inference_for_older_message(session_id)
+        return {**metadata, "created_at": row["created_at"]}
+
+    def _last_inference_for_older_message(self, session_id: str) -> dict | None:
+        for row in self.database.fetch_all("SELECT provider_id, model_id, metadata_json, created_at FROM messages WHERE session_id=? AND role='assistant' ORDER BY rowid DESC LIMIT 50", (session_id,)):
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except (TypeError, ValueError):
+                metadata = {}
+            if metadata.get("execution_type") in {"inference", "worker"}:
+                return {**metadata, "created_at": row["created_at"]}
+        return None
+
+    def is_identity_question(self, content: str) -> bool:
+        text = content.strip().lower()
+        return any(signal in text for signal in (
+            "which model is responding", "what model answered", "what provider handled",
+            "was that local or cloud", "did you use a fallback", "why did you use phi",
+            "did qwen fail", "which agent answered", "what handled the last request",
+            "what model are you using",
+        ))
+
+    def render(self, session_id: str | None = None, identity: bool = False) -> str:
+        if identity:
+            last = self._last_inference(session_id)
+            lines = ["This response is being generated directly by VirtizAI without an LLM call."]
+            if not last:
+                lines.append("There is no prior model or worker inference recorded in this session.")
+                return "\n".join(lines)
+            target = last.get("worker") or (f"{last.get('provider_name')}:{last.get('model_name')}" if last.get("provider_name") and last.get("model_name") else "unknown execution target")
+            lines.append(f"The most recent execution in this session used: {target}.")
+            if last.get("fallback_used"):
+                lines.append(f"It used the configured fallback because {last.get('fallback_reason') or 'the primary route was unavailable'}.")
+            elif last.get("provider_name"):
+                lines.append(f"Local/cloud classification: {last.get('locality') or 'unknown'}.")
+            return "\n".join(lines)
         snapshot = self.snapshot()
         lines = ["Current VirtizAI routing configuration:"]
         labels = {"simple": "Secretary / Simple", "medium": "Medium", "hard": "Hard", "hard_fallback": "Hard fallback"}
@@ -117,7 +165,6 @@ class IntrospectionService:
                 reason = item.get("reason")
                 lines.append(f"  {target} — {status}" + (f" ({reason})" if reason else ""))
         return "\n".join(lines)
-
 
 class SessionService:
     def __init__(self, database: Database) -> None:
@@ -155,8 +202,8 @@ class SessionService:
             INSERT INTO messages
                 (id, session_id, role, content, provider_id, model_id, route_id,
                  input_tokens, output_tokens, total_tokens, latency_ms,
-                 usage_exact, ttft_ms, estimated_cost)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 usage_exact, ttft_ms, estimated_cost, metadata_json)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message_id,
@@ -173,6 +220,7 @@ class SessionService:
                 details.get("usage_exact"),
                 details.get("ttft_ms"),
                 details.get("estimated_cost"),
+                json.dumps(details, sort_keys=True),
             ),
         )
         self.database.execute(
@@ -253,15 +301,21 @@ class CoreService:
             intent = classification.kind
         if self.introspection.matches(content):
             self.sessions.add_message(session_id, "user", content)
-            response_content = self.introspection.render()
-            message_id = self.sessions.add_message(session_id, "assistant", response_content)
-            self.telemetry.record_event(request_id, "request_complete", json.dumps({"task_class": "simple", "introspection": True, "tokens": 0}))
+            identity = self.introspection.is_identity_question(content)
+            response_content = self.introspection.render(session_id, identity=identity)
+            message_id = self.sessions.add_message(session_id, "assistant", response_content, {
+                "execution_type": "system", "role": "secretary", "task_class": "simple",
+                "tokens": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+            })
+            self.telemetry.record_event(request_id, "request_complete", json.dumps({"task_class": "simple", "introspection": True, "execution_type": "system", "tokens": 0}))
             return SecretaryResponse(request_id, session_id, message_id, response_content, None, None, None, latency_ms=(perf_counter() - started) * 1000, task_class="simple")
         with self.telemetry.stage(request_id, "message_persist"):
             self.sessions.add_message(session_id, "user", content)
         route = None
         inference = None
         job_created = False
+        job_id = None
+        fallback_reason = None
         recent_context = [
             {"role": row["role"], "content": row["content"]}
             for row in self.database.fetch_all(
@@ -296,6 +350,8 @@ class CoreService:
                     )
                     break
                 except Exception as exc:
+                    if fallback_reason is None:
+                        fallback_reason = str(exc)[:300]
                     if self.events is not None:
                         await self.events.transition("model", candidate.model_id, f"{candidate.provider_name}:{candidate.model_name}", "unavailable", str(exc)[:300], "error")
                     self.database.execute(
@@ -314,14 +370,24 @@ class CoreService:
             "assistant",
             response_content,
             {
+                "execution_type": "worker" if job_created else ("inference" if route else "system"),
+                "role": "codex_worker" if job_created else "secretary",
+                "task_class": classification.kind,
                 "provider_id": route.provider_id if route else None,
+                "provider_name": route.provider_name if route else None,
                 "model_id": route.model_id if route else None,
+                "model_name": route.model_name if route else None,
                 "route_id": route.route_id if route else None,
+                "worker": "Codex CLI worker" if job_created else None,
+                "job_id": job_id,
+                "locality": "local" if route and route.provider_name and "NeuralWatt" not in route.provider_name else ("cloud" if route else None),
+                "fallback_used": bool(route and getattr(route, "ordinal", 0) > 0),
+                "fallback_reason": fallback_reason,
                 "latency_ms": latency_ms,
                 "ttft_ms": inference.ttft_ms if inference else None,
-                "input_tokens": inference.input_tokens if inference else None,
-                "output_tokens": inference.output_tokens if inference else None,
-                "total_tokens": inference.total_tokens if inference else None,
+                "input_tokens": inference.input_tokens if inference else 0,
+                "output_tokens": inference.output_tokens if inference else 0,
+                "total_tokens": inference.total_tokens if inference else 0,
                 "usage_exact": inference.usage_exact if inference else None,
                 "estimated_cost": inference.estimated_cost if inference else None,
             },

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 
@@ -30,7 +31,7 @@ async def test_health_schema_and_restart_preserve_state(tmp_path: Path) -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         health = await client.get("/healthz")
         assert health.status_code == 200
-        assert health.json()["schema_version"] == 13
+        assert health.json()["schema_version"] == 14
         assert (await client.get("/")).status_code == 200
         assert (await client.get("/static/styles.css")).status_code == 200
         created = await client.post("/v1/sessions", json={"user_id": "user-1"})
@@ -56,12 +57,12 @@ def test_wal_and_migrations_are_versioned(tmp_path: Path) -> None:
     database.open()
     journal_mode = database.fetch_one("PRAGMA journal_mode")[0]
     assert journal_mode.lower() == "wal"
-    assert database.fetch_one("SELECT MAX(version) FROM schema_migrations")[0] == 13
+    assert database.fetch_one("SELECT MAX(version) FROM schema_migrations")[0] == 14
     database.close()
 
     reopened = Database(tmp_path / "state.db")
     reopened.open()
-    assert reopened.fetch_one("SELECT COUNT(*) FROM schema_migrations")[0] == 13
+    assert reopened.fetch_one("SELECT COUNT(*) FROM schema_migrations")[0] == 14
     reopened.close()
 
 
@@ -120,3 +121,29 @@ async def test_background_job_runs_independently(tmp_path: Path) -> None:
     assert job is not None
     assert job["status"] == "succeeded"
     database.close()
+
+
+@pytest.mark.asyncio
+async def test_identity_introspection_uses_session_execution_metadata(tmp_path: Path) -> None:
+    app = create_app(make_config(tmp_path))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/v1/sessions", json={"user_id": "identity-user"})
+        session_id = created.json()["session_id"]
+        app.state.core.sessions.add_message(session_id, "assistant", "prior response", {
+            "execution_type": "inference", "role": "secretary",
+            "provider_name": "Homelab Ollama", "model_name": "phi4-mini:latest",
+            "locality": "local", "fallback_used": True,
+            "fallback_reason": "primary unavailable",
+        })
+        response = await client.post(
+            f"/v1/sessions/{session_id}/messages",
+            json={"user_id": "identity-user", "content": "Which model is responding to me right now?"},
+        )
+        assert response.status_code == 200
+        assert "without an LLM call" in response.json()["content"]
+        assert "Homelab Ollama:phi4-mini:latest" in response.json()["content"]
+        assert response.json()["output_tokens"] is None
+        row = app.state.database.fetch_one(
+            "SELECT metadata_json FROM messages WHERE id = ?", (response.json()["message_id"],)
+        )
+        assert json.loads(row["metadata_json"])["execution_type"] == "system"

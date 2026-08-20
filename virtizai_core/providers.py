@@ -81,7 +81,7 @@ class ProviderRegistry:
         values = (model.state, model.context_limit, json.dumps(model.capabilities), json.dumps(model.metadata), model_id)
         if row:
             self.database.execute(
-                "UPDATE models SET status = ?, context_window = ?, capabilities_json = ?, metadata_json = ?, last_seen_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                "UPDATE models SET status = ?, context_window = ?, capabilities_json = ?, metadata_json = ?, last_seen_at = CURRENT_TIMESTAMP, last_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 values,
             )
         else:
