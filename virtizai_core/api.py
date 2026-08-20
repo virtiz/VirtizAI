@@ -5,6 +5,7 @@ import uuid
 import asyncio
 import os
 import sqlite3
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -312,6 +313,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await app.state.discord_gateway.start()
+        for row in database.fetch_all("SELECT id, name, health_status FROM providers WHERE enabled=1"):
+            await app.state.events.transition("provider", row["id"], row["name"], row["health_status"], initial=True)
+        for row in database.fetch_all("SELECT m.id, m.name, p.name AS provider_name, m.status FROM models m JOIN providers p ON p.id=m.provider_id WHERE p.enabled=1"):
+            await app.state.events.transition("model", row["id"], f"{row['provider_name']}:{row['name']}", row["status"], initial=True)
         try:
             yield
         finally:

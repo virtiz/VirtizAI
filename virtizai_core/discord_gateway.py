@@ -142,7 +142,6 @@ class DiscordGateway:
         backoff = 1
         while not self._stop.is_set():
             try:
-                await self._set_status("connecting")
                 await self.client.start(token, reconnect=True)
                 backoff = 1
             except asyncio.CancelledError:
