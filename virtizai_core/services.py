@@ -52,6 +52,7 @@ class IntrospectionService:
         "did you use a fallback", "why did you use phi", "did qwen fail", "which agent answered", "what handled the last request",
         "which models are healthy", "why did you fall back", "why can't you use",
         "which providers are down", "status of the medium route", "why are models unavailable",
+        "is the secretary model warm", "is secretary warm", "what model is loaded", "which model is loaded",
     )
 
     def __init__(self, database: Database, workspace_root: Path) -> None:
@@ -73,6 +74,8 @@ class IntrospectionService:
 
     def identity_kind(self, content: str) -> str | None:
         text = self._normalized(content)
+        if ("warm" in text.split() and "secretary" in text.split()) or self._has_phrase(text, "what model is loaded") or self._has_phrase(text, "which model is loaded"):
+            return "warm_status"
         if not self.is_identity_question(text):
             return None
         if any(self._has_phrase(text, term) for term in ("last message", "previous response", "that message", "last response", "previous request")):
@@ -118,7 +121,7 @@ class IntrospectionService:
             if role:
                 rows = self.database.fetch_all(
                     """SELECT rt.provider_id,rt.model_id,rt.ordinal,p.name provider_name,
-                              p.health_status,p.last_health_error,m.name model_name,m.status model_status,m.last_error
+                              p.health_status,p.last_health_error,m.name model_name,m.status model_status,m.last_error,m.user_overrides_json
                        FROM routes r JOIN route_targets rt ON rt.route_id=r.id
                        JOIN providers p ON p.id=rt.provider_id JOIN models m ON m.id=rt.model_id
                        WHERE r.role_id=? AND r.enabled=1 ORDER BY r.priority,rt.ordinal""",
@@ -131,6 +134,8 @@ class IntrospectionService:
                     "reason": row["last_error"] or (row["last_health_error"] if row["health_status"] not in {"healthy", "degraded"} else None),
                     "provider_health": row["health_status"], "model_status": row["model_status"],
                     "ordinal": row["ordinal"],
+                    "residency": (json.loads(row["user_overrides_json"] or "{}").get("residency") if row["user_overrides_json"] else None),
+                    "last_warmup": (json.loads(row["user_overrides_json"] or "{}").get("last_warmup") if row["user_overrides_json"] else None),
                 } for row in rows]
             result["routes"][task_class] = entries
         codex = shutil.which(os.environ.get("VIRTIZAI_CODEX_BIN", "codex"))
@@ -177,6 +182,13 @@ class IntrospectionService:
 
 
     def render(self, session_id: str | None = None, identity: bool = False) -> str:
+        if identity == "warm_status":
+            snapshot = self.snapshot()
+            entries = snapshot["routes"].get("simple") or []
+            if not entries:
+                return "Secretary model is not configured."
+            entry = entries[0]
+            return f"Secretary model {entry.get('provider')}:{entry.get('model')} is {entry.get('residency') or 'not resident'} (route status: {entry.get('status')})."
         if identity:
             kind = identity if isinstance(identity, str) else "current"
             record = self._previous_assistant(session_id) if kind == "previous_response" else self._last_inference(session_id)

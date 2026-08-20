@@ -49,7 +49,9 @@ class ProviderAdapter(Protocol):
     async def health(self) -> ProviderHealth: ...
     async def list_models(self) -> list[DiscoveredModel]: ...
     async def get_model_metadata(self, model_name: str) -> DiscoveredModel: ...
-    async def chat(self, messages: list[dict[str, str]], model_name: str, max_tokens: int | None = None) -> InferenceResponse: ...
+    async def chat(self, messages: list[dict[str, str]], model_name: str, max_tokens: int | None = None, keep_alive: int | str | None = None) -> InferenceResponse: ...
+    async def prewarm(self, model_name: str, keep_alive: int | str | None = None) -> float: ...
+    async def residency(self) -> set[str]: ...
 
 
 class AdapterError(RuntimeError):
@@ -122,7 +124,7 @@ class OllamaAdapter:
             metadata={"details": payload.get("details", {})},
         )
 
-    async def chat(self, messages: list[dict[str, str]], model_name: str, max_tokens: int | None = None) -> InferenceResponse:
+    async def chat(self, messages: list[dict[str, str]], model_name: str, max_tokens: int | None = None, keep_alive: int | str | None = None) -> InferenceResponse:
         started = time.perf_counter()
         options = dict(self.chat_options)
         if max_tokens:
@@ -130,7 +132,7 @@ class OllamaAdapter:
         payload = await asyncio.to_thread(
             self._request,
             "/api/chat",
-            {"model": model_name, "messages": messages, "stream": False, **({"options": options} if options else {})},
+            {"model": model_name, "messages": messages, "stream": False, **({"options": options} if options else {}), **({"keep_alive": keep_alive} if keep_alive is not None else {})},
         )
         latency_ms = (time.perf_counter() - started) * 1000
         message = payload.get("message", {})
@@ -146,6 +148,21 @@ class OllamaAdapter:
             latency_ms=latency_ms,
             usage_exact=prompt_tokens is not None or output_tokens is not None,
         )
+
+    async def prewarm(self, model_name: str, keep_alive: int | str | None = None) -> float:
+        started = time.perf_counter()
+        await asyncio.to_thread(self._request, "/api/chat", {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "stream": False,
+            "options": {"num_predict": 1, **self.chat_options},
+            **({"keep_alive": keep_alive} if keep_alive is not None else {}),
+        })
+        return (time.perf_counter() - started) * 1000
+
+    async def residency(self) -> set[str]:
+        payload = await asyncio.to_thread(self._request, "/api/ps")
+        return {str(item.get("name") or item.get("model")) for item in payload.get("models", [])}
 
 
 class MockProviderAdapter:
@@ -176,7 +193,7 @@ class MockProviderAdapter:
                 return model
         raise AdapterError(f"model not found: {model_name}")
 
-    async def chat(self, messages: list[dict[str, str]], model_name: str, max_tokens: int | None = None) -> InferenceResponse:
+    async def chat(self, messages: list[dict[str, str]], model_name: str, max_tokens: int | None = None, keep_alive: int | str | None = None) -> InferenceResponse:
         if self.fail:
             raise AdapterError("isolated mock inference failure")
         if self.delay_ms:

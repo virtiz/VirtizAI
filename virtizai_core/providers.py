@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from .adapters import DiscoveredModel, InferenceResponse, MockProviderAdapter, OllamaAdapter, ProviderAdapter
@@ -73,7 +74,27 @@ class ProviderRegistry:
         return await self.adapter_for(provider_id).health()
 
     async def chat(self, provider_id: str, model_name: str, messages: list[dict[str, str]], max_tokens: int | None = None) -> InferenceResponse:
-        return await self.adapter_for(provider_id).chat(messages, model_name, max_tokens)
+        row = self.database.fetch_one("SELECT user_overrides_json FROM models WHERE provider_id=? AND name=?", (provider_id, model_name))
+        overrides = json.loads((row["user_overrides_json"] if row else "{}") or "{}")
+        return await self.adapter_for(provider_id).chat(messages, model_name, max_tokens, overrides.get("keep_alive"))
+
+    async def prewarm(self, provider_id: str, model_name: str) -> float:
+        row = self.database.fetch_one("SELECT user_overrides_json FROM models WHERE provider_id=? AND name=?", (provider_id, model_name))
+        overrides = json.loads((row["user_overrides_json"] if row else "{}") or "{}")
+        adapter = self.adapter_for(provider_id)
+        if not hasattr(adapter, "prewarm"):
+            return 0.0
+        latency = await adapter.prewarm(model_name, overrides.get("keep_alive"))
+        overrides.update({"residency": "warm", "last_warmup": datetime.now(timezone.utc).isoformat()})
+        model_id = self.database.fetch_one("SELECT id FROM models WHERE provider_id=? AND name=?", (provider_id, model_name))["id"]
+        self.database.execute("UPDATE models SET status='warm', user_overrides_json=?, last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps(overrides), model_id))
+        return latency
+
+    async def residency(self, provider_id: str) -> set[str]:
+        adapter = self.adapter_for(provider_id)
+        if not hasattr(adapter, "residency"):
+            return set()
+        return await adapter.residency()
 
     def _upsert_model(self, provider_id: str, model: DiscoveredModel) -> str:
         row = self.database.fetch_one("SELECT id FROM models WHERE provider_id = ? AND name = ?", (provider_id, model.name))

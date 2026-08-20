@@ -310,6 +310,27 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.secrets = FileSecretStore(app_config.data_dir / "secrets.json")
     app.state.discord_gateway = DiscordGateway(app.state.discord, database, app.state.secrets, jobs, app.state.events)
 
+    async def prewarm_secretary() -> None:
+        targets = database.fetch_all(
+            """SELECT rt.provider_id,rt.model_id,p.name provider,m.name model,m.user_overrides_json
+               FROM routes r JOIN route_targets rt ON rt.route_id=r.id
+               JOIN providers p ON p.id=rt.provider_id JOIN models m ON m.id=rt.model_id
+               WHERE r.role_id='role-secretary' AND r.enabled=1 AND rt.enabled=1
+               ORDER BY r.priority,rt.ordinal LIMIT 1"""
+        )
+        if not targets:
+            return
+        target = targets[0]
+        overrides = json.loads(target["user_overrides_json"] or "{}")
+        if not overrides.get("prewarm"):
+            return
+        try:
+            latency = await providers.prewarm(target["provider_id"], target["model"])
+            await app.state.events.transition("model", target["model_id"], f"{target['provider']}:{target['model']}", "warm", f"prewarm_ms={latency:.1f}", initial=True)
+        except Exception as exc:
+            database.execute("UPDATE models SET user_overrides_json=?, last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (json.dumps({**overrides, "residency": "unavailable", "last_warm_error": str(exc)[:300]}), str(exc)[:300], target["model_id"]))
+            await app.state.events.transition("model", target["model_id"], f"{target['provider']}:{target['model']}", "degraded", str(exc)[:300], "warning")
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await app.state.discord_gateway.start()
@@ -321,9 +342,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
         codex_state = "available" if shutil.which(codex_bin) and (codex_home / "auth.json").exists() else "unavailable"
         await app.state.events.transition("worker", "codex_worker", "Codex CLI worker", codex_state, initial=True)
+        prewarm_task = asyncio.create_task(prewarm_secretary())
         try:
             yield
         finally:
+            prewarm_task.cancel()
+            await asyncio.gather(prewarm_task, return_exceptions=True)
             await app.state.discord_gateway.stop()
             await jobs.wait_for_idle()
             database.close()
@@ -729,6 +753,29 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/v1/models")
     async def list_models() -> list[dict]:
         return providers.list_models()
+
+    @app.put("/v1/models/{model_id}/overrides")
+    async def update_model_overrides(model_id: str, overrides: dict) -> dict:
+        row = database.fetch_one("SELECT id,user_overrides_json FROM models WHERE id=?", (model_id,))
+        if row is None:
+            raise HTTPException(status_code=404, detail="Model not found")
+        current = json.loads(row["user_overrides_json"] or "{}")
+        current.update(overrides)
+        providers.set_model_override(model_id, current)
+        return {"model_id": model_id, "overrides": current}
+
+    @app.get("/v1/models/{model_id}/residency")
+    async def model_residency(model_id: str) -> dict:
+        row = database.fetch_one("SELECT m.id,m.name,m.provider_id,m.status,m.user_overrides_json,p.name provider_name FROM models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?", (model_id,))
+        if row is None:
+            raise HTTPException(status_code=404, detail="Model not found")
+        overrides = json.loads(row["user_overrides_json"] or "{}")
+        resident = False
+        try:
+            resident = row["name"] in await providers.residency(row["provider_id"])
+        except Exception:
+            resident = overrides.get("residency") == "warm"
+        return {"model_id": row["id"], "provider": row["provider_name"], "model": row["name"], "configured": True, "status": row["status"], "resident": resident, "residency": "warm" if resident else overrides.get("residency", "cold"), "last_warmup": overrides.get("last_warmup")}
 
     @app.post("/v1/benchmark/{provider_id}/{model_name}")
     async def benchmark(provider_id: str, model_name: str) -> dict:
