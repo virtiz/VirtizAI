@@ -78,7 +78,7 @@ class IntrospectionService:
             if role:
                 rows = self.database.fetch_all(
                     """SELECT rt.provider_id,rt.model_id,rt.ordinal,p.name provider_name,
-                              p.health_status,m.name model_name,m.status model_status
+                              p.health_status,p.last_health_error,m.name model_name,m.status model_status,m.last_error
                        FROM routes r JOIN route_targets rt ON rt.route_id=r.id
                        JOIN providers p ON p.id=rt.provider_id JOIN models m ON m.id=rt.model_id
                        WHERE r.role_id=? AND r.enabled=1 ORDER BY r.priority,rt.ordinal""",
