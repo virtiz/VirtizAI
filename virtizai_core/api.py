@@ -19,6 +19,7 @@ from .benchmark import benchmark_candidate
 from .db import Database
 from .auth import AuthAdminService
 from .health import HealthManager
+from .alerts import OperationalEventService
 from .execution import ExecutionManager
 from .tools import ToolRegistryService, ToolAuthorizationError
 from .jobs import JobManager
@@ -168,6 +169,7 @@ class DiscordConfigUpdate(BaseModel):
     slash_commands: bool = True
     dedicated_channel_id: str | None = None
     release_channel_id: str | None = None
+    alert_channel_id: str | None = None
     allowed_servers: list[str] = Field(default_factory=list)
     allowed_channels: list[str] = Field(default_factory=list)
     allowed_users: list[str] = Field(default_factory=list)
@@ -287,7 +289,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.context = ContextBroker(database)
     app.state.execution = ExecutionManager(database, app_config.workspace_dir)
     app.state.tools = ToolRegistryService(app.state.execution)
-    app.state.health = HealthManager(database, providers.adapters)
+    app.state.events = OperationalEventService(database)
+    app.state.health = HealthManager(database, providers.adapters, app.state.events)
     app.state.projects = ProjectRegistry(database)
     app.state.environments = EnvironmentRegistry(database)
     app.state.integrations = IntegrationRegistry(database)
@@ -304,7 +307,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.interfaces = InterfaceService(database, core)
     app.state.discord = DiscordAdapter(app.state.interfaces, app.state.updates)
     app.state.secrets = FileSecretStore(app_config.data_dir / "secrets.json")
-    app.state.discord_gateway = DiscordGateway(app.state.discord, database, app.state.secrets, jobs)
+    app.state.discord_gateway = DiscordGateway(app.state.discord, database, app.state.secrets, jobs, app.state.events)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -329,6 +332,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "version": app_config.app_version,
             "schema_version": schema_version,
         }
+
+    @app.get("/v1/operational-events")
+    async def operational_events(limit: int = 100) -> list[dict]:
+        return app.state.events.history(limit)
 
     @app.get("/v1/dashboard")
     async def dashboard() -> dict:
@@ -574,7 +581,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.put("/v1/discord/config")
     async def update_discord_config(request: DiscordConfigUpdate) -> dict:
         values = request.model_dump()
-        database.execute("""UPDATE discord_config SET enabled=?, mode=?, bot_secret_ref=?, allow_dms=?, require_mentions=?, slash_commands=?, dedicated_channel_id=?, release_channel_id=?, allowed_servers_json=?, allowed_channels_json=?, allowed_users_json=?, allowed_roles_json=?, admin_users_json=?, admin_roles_json=?, updated_at=CURRENT_TIMESTAMP WHERE id='discord-default'""", (int(values["enabled"]), values["mode"], values["bot_secret_ref"], int(values["allow_dms"]), int(values["require_mentions"]), int(values["slash_commands"]), values["dedicated_channel_id"], values["release_channel_id"], json.dumps(values["allowed_servers"]), json.dumps(values["allowed_channels"]), json.dumps(values["allowed_users"]), json.dumps(values["allowed_roles"]), json.dumps(values["admin_users"]), json.dumps(values["admin_roles"])))
+        database.execute("""UPDATE discord_config SET enabled=?, mode=?, bot_secret_ref=?, allow_dms=?, require_mentions=?, slash_commands=?, dedicated_channel_id=?, release_channel_id=?, alert_channel_id=?, allowed_servers_json=?, allowed_channels_json=?, allowed_users_json=?, allowed_roles_json=?, admin_users_json=?, admin_roles_json=?, updated_at=CURRENT_TIMESTAMP WHERE id='discord-default'""", (int(values["enabled"]), values["mode"], values["bot_secret_ref"], int(values["allow_dms"]), int(values["require_mentions"]), int(values["slash_commands"]), values["dedicated_channel_id"], values["release_channel_id"], values["alert_channel_id"], json.dumps(values["allowed_servers"]), json.dumps(values["allowed_channels"]), json.dumps(values["allowed_users"]), json.dumps(values["allowed_roles"]), json.dumps(values["admin_users"]), json.dumps(values["admin_roles"])))
         await app.state.discord_gateway.reload()
         return await discord_config()
 

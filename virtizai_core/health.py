@@ -13,9 +13,10 @@ def now_iso() -> str:
 class HealthManager:
     """Hysteretic provider health: transient failures do not immediately flap routes."""
 
-    def __init__(self, database: Database, adapters: dict[str, ProviderAdapter]) -> None:
+    def __init__(self, database: Database, adapters: dict[str, ProviderAdapter], events=None) -> None:
         self.database = database
         self.adapters = adapters
+        self.events = events
 
     async def check_provider(self, provider_id: str) -> ProviderHealth:
         row = self.database.fetch_one(
@@ -53,6 +54,8 @@ class HealthManager:
             """,
             (next_state, failures, successes, now_iso(), result.error, provider_id),
         )
+        if self.events is not None and next_state != current:
+            await self.events.transition("provider", provider_id, row["name"], next_state, result.error, "error" if next_state in {"unavailable", "degraded"} else "info")
         return ProviderHealth(next_state, result.latency_ms, result.error, result.capabilities)
 
     def set_provider_status(self, provider_id: str, status: str) -> None:

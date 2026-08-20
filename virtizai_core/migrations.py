@@ -621,6 +621,30 @@ def migration_11(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_13(connection: sqlite3.Connection) -> None:
+    """Persist generic operational state transitions and Discord alert routing."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(discord_config)")}
+    if "alert_channel_id" not in columns:
+        connection.execute("ALTER TABLE discord_config ADD COLUMN alert_channel_id TEXT")
+    connection.executescript("""
+        CREATE TABLE IF NOT EXISTS operational_events (
+            id TEXT PRIMARY KEY,
+            component_type TEXT NOT NULL,
+            component_id TEXT NOT NULL,
+            component_name TEXT NOT NULL,
+            previous_state TEXT,
+            new_state TEXT NOT NULL,
+            reason TEXT,
+            severity TEXT NOT NULL DEFAULT 'info',
+            initial_state INTEGER NOT NULL DEFAULT 0,
+            notification_status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_operational_events_component
+            ON operational_events(component_type, component_id, created_at);
+    """)
+
+
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -634,6 +658,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (10, migration_10),
     (11, migration_11),
     (12, migration_12),
+    (13, migration_13),
 )
 
 

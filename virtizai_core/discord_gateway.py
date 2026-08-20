@@ -38,11 +38,14 @@ class GatewayStatus:
 class DiscordGateway:
     """Discord Gateway transport over the shared VirtizAI DiscordAdapter."""
 
-    def __init__(self, adapter: DiscordAdapter, database, secret_store, jobs=None) -> None:
+    def __init__(self, adapter: DiscordAdapter, database, secret_store, jobs=None, events=None) -> None:
         self.adapter = adapter
         self.database = database
         self.secret_store = secret_store
         self.jobs = jobs
+        self.events = events
+        if self.events is not None:
+            self.events.subscribe(self._on_operational_event)
         self.client = None
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -101,7 +104,10 @@ class DiscordGateway:
         return self._status.as_dict()
 
     async def _set_status(self, status: str, error: str | None = None) -> None:
+        previous = self._status.status
         self._status = GatewayStatus(status, error, self._status.connected_at, self._status.reconnects)
+        if self.events is not None and status != previous:
+            await self.events.transition("gateway", "discord", "Discord gateway", status, error, "error" if status == "error" else "info", initial=previous == "disabled")
 
     async def _run(self, token: str) -> None:
         if discord is None:
@@ -118,6 +124,7 @@ class DiscordGateway:
 
         @self.client.event
         async def on_ready():
+            await self._set_status("connected")
             self._status = GatewayStatus("connected", None, datetime.now(timezone.utc).isoformat(), self._status.reconnects)
 
         @self.client.event
@@ -147,6 +154,29 @@ class DiscordGateway:
             finally:
                 if self.client and not self.client.is_closed():
                     await self.client.close()
+
+    @staticmethod
+    def _alert_text(event: dict) -> str:
+        icon = "🟢" if event["new_state"] in {"healthy", "available", "connected", "succeeded"} else ("🟡" if event["new_state"] in {"degraded", "connecting"} else "🔴")
+        title = event["new_state"].replace("_", " ").title()
+        text = f"{icon} {event['component_type'].title()} {title}\n{event['component_name']}"
+        if event.get("reason"):
+            text += f"\nReason: {str(event['reason'])[:500]}"
+        return text
+
+    async def _on_operational_event(self, event: dict) -> None:
+        row = self.config()
+        channel_id = row["alert_channel_id"] if row and "alert_channel_id" in row.keys() else None
+        if not channel_id or not self.client:
+            return
+        channel = self.client.get_channel(int(channel_id))
+        if channel is None:
+            return
+        try:
+            await channel.send(self._alert_text(event))
+            self.database.execute("UPDATE operational_events SET notification_status='delivered' WHERE id=?", (event["id"],))
+        except Exception:
+            self.database.execute("UPDATE operational_events SET notification_status='failed' WHERE id=?", (event["id"],))
 
     async def _on_job_complete(self, job: dict) -> None:
         payload = json.loads(job.get("payload_json") or "{}")
