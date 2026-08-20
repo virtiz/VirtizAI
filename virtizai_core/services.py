@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 import os
@@ -364,7 +365,14 @@ class CoreService:
             for candidate in candidates:
                 try:
                     with self.telemetry.stage(request_id, "provider_inference"):
-                        inference = await self.providers.chat(candidate.provider_id, candidate.model_name, recent_context + [{"role": "user", "content": content}], max_tokens=policy.output_token_budget())
+                        execution_budget = float(os.environ.get(
+                            "VIRTIZAI_SECRETARY_TIMEOUT_SECONDS" if classification.kind == "simple" else "VIRTIZAI_MEDIUM_TIMEOUT_SECONDS",
+                            "12" if classification.kind == "simple" else "120",
+                        ))
+                        inference = await asyncio.wait_for(
+                            self.providers.chat(candidate.provider_id, candidate.model_name, recent_context + [{"role": "user", "content": content}], max_tokens=policy.output_token_budget()),
+                            timeout=execution_budget,
+                        )
                     route = candidate
                     if self.events is not None:
                         await self.events.transition("model", candidate.model_id, f"{candidate.provider_name}:{candidate.model_name}", "available", None, "info")
