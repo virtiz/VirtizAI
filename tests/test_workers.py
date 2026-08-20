@@ -40,3 +40,16 @@ async def test_hard_request_is_async_job_and_medium_is_explicitly_unavailable(tm
         medium = await client.post(f"/v1/sessions/{sid}/messages", json={"user_id": "u", "content": "analyze this architecture"})
         assert "Medium route unavailable" in medium.json()["content"]
         await app.state.jobs.wait_for_idle()
+
+
+def test_introspection_is_deterministic_and_secret_free(tmp_path, monkeypatch):
+    from virtizai_core.db import Database
+    from virtizai_core.services import IntrospectionService
+    db = Database(tmp_path / "state.db")
+    db.open()
+    service = IntrospectionService(db, tmp_path / "workspace")
+    assert service.matches("what is your current routing configuration?")
+    rendered = service.render()
+    assert "Current VirtizAI routing configuration" in rendered
+    assert "API_KEY" not in rendered
+    assert "token" not in rendered.lower()

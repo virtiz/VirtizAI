@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import uuid
+import os
+import shutil
+from pathlib import Path
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -34,6 +37,82 @@ class SecretaryResponse:
     estimated_cost: float | None = None
     job_created: bool = False
     task_class: str = "simple"
+
+
+class IntrospectionService:
+    """Deterministic, secret-free view of configured routes and worker state."""
+
+    _signals = (
+        "current routing", "routing configuration", "what model", "what providers",
+        "secretary model", "fallback model", "what workers", "codex connected",
+        "provider configuration", "configured providers",
+    )
+
+    def __init__(self, database: Database, workspace_root: Path) -> None:
+        self.database = database
+        self.workspace_root = workspace_root
+
+    def matches(self, content: str) -> bool:
+        text = content.strip().lower()
+        return any(signal in text for signal in self._signals)
+
+    def _target(self, row: dict, eligible: set[tuple[str, str]]) -> str:
+        key = (row["provider_id"], row["model_id"])
+        status = "eligible" if key in eligible else "unavailable"
+        return f"{row['provider_name']}:{row['model_name']} ({status})"
+
+    def snapshot(self) -> dict:
+        from .routing import RoutingEngine
+        roles = {"simple": "secretary", "medium": "general-reasoning"}
+        result = {"routes": {}, "providers": [], "workers": []}
+        for provider in self.database.fetch_all("SELECT id,name,adapter_type,health_status,enabled FROM providers ORDER BY name"):
+            result["providers"].append({
+                "name": provider["name"], "type": provider["adapter_type"],
+                "health": provider["health_status"], "enabled": bool(provider["enabled"]),
+            })
+        for task_class, role_name in roles.items():
+            role = self.database.fetch_one("SELECT id FROM roles WHERE name=?", (role_name,))
+            entries = []
+            if role:
+                rows = self.database.fetch_all(
+                    """SELECT rt.provider_id,rt.model_id,rt.ordinal,p.name provider_name,
+                              p.health_status,m.name model_name,m.status model_status
+                       FROM routes r JOIN route_targets rt ON rt.route_id=r.id
+                       JOIN providers p ON p.id=rt.provider_id JOIN models m ON m.id=rt.model_id
+                       WHERE r.role_id=? AND r.enabled=1 ORDER BY r.priority,rt.ordinal""",
+                    (role["id"],),
+                )
+                eligible = {(item.provider_id, item.model_id) for item in RoutingEngine(self.database).eligible_routes(role["id"])}
+                entries = [{
+                    "role": role_name, "provider": row["provider_name"], "model": row["model_name"],
+                    "status": "eligible" if (row["provider_id"], row["model_id"]) in eligible else "unavailable",
+                    "provider_health": row["health_status"], "model_status": row["model_status"],
+                    "ordinal": row["ordinal"],
+                } for row in rows]
+            result["routes"][task_class] = entries
+        codex = shutil.which(os.environ.get("VIRTIZAI_CODEX_BIN", "codex"))
+        auth_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+        result["workers"].append({
+            "name": "Codex CLI worker", "type": "codex_worker",
+            "available": bool(codex), "authenticated": (auth_home / "auth.json").exists(),
+            "workspace_root": str(self.workspace_root),
+        })
+        result["routes"]["hard"] = [{"worker": "Codex CLI worker", "status": "available" if codex else "unavailable"}]
+        result["routes"]["hard_fallback"] = [{"provider": "NeuralWatt", "status": "configured" if any(p["name"] == "NeuralWatt" for p in result["providers"]) else "not configured"}]
+        return result
+
+    def render(self) -> str:
+        snapshot = self.snapshot()
+        lines = ["Current VirtizAI routing configuration:"]
+        labels = {"simple": "Secretary / Simple", "medium": "Medium", "hard": "Hard", "hard_fallback": "Hard fallback"}
+        for key, label in labels.items():
+            lines.append(label + ":")
+            entries = snapshot["routes"].get(key) or [{"status": "not configured"}]
+            for item in entries:
+                target = item.get("worker") or (f"{item.get('provider')}:{item.get('model')}" if item.get("model") else item.get("provider", "route"))
+                status = item.get("status", "unknown")
+                lines.append(f"  {target} — {status}")
+        return "\n".join(lines)
 
 
 class SessionService:
@@ -138,6 +217,7 @@ class CoreService:
         self.sessions = SessionService(database)
         self.policy = IntentPolicyEngine()
         self.classifier = TaskClassifier()
+        self.introspection = IntrospectionService(database, Path(os.environ.get('VIRTIZAI_WORKSPACE_DIR', '/tmp/virtizai-workspace')))
         self.codex_worker = codex_worker
         self.routes = RouteResolver(database)
 
@@ -165,6 +245,12 @@ class CoreService:
         with self.telemetry.stage(request_id, "intent_policy"):
             classification = self.classifier.classify(content)
             intent = classification.kind
+        if self.introspection.matches(content):
+            self.sessions.add_message(session_id, "user", content)
+            response_content = self.introspection.render()
+            message_id = self.sessions.add_message(session_id, "assistant", response_content)
+            self.telemetry.record_event(request_id, "request_complete", json.dumps({"task_class": "simple", "introspection": True, "tokens": 0}))
+            return SecretaryResponse(request_id, session_id, message_id, response_content, None, None, None, latency_ms=(perf_counter() - started) * 1000, task_class="simple")
         with self.telemetry.stage(request_id, "message_persist"):
             self.sessions.add_message(session_id, "user", content)
         route = None
@@ -196,8 +282,16 @@ class CoreService:
                     with self.telemetry.stage(request_id, "provider_inference"):
                         inference = await self.providers.chat(candidate.provider_id, candidate.model_name, recent_context + [{"role": "user", "content": content}], max_tokens=policy.output_token_budget())
                     route = candidate
+                    self.database.execute(
+                        "UPDATE models SET status='available', last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (candidate.model_id,),
+                    )
                     break
-                except Exception:
+                except Exception as exc:
+                    self.database.execute(
+                        "UPDATE models SET status='error', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (type(exc).__name__, candidate.model_id),
+                    )
                     continue
             response_content = (
                 f"{classification.kind.title()} route unavailable; configure an eligible provider/model route."
