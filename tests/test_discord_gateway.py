@@ -143,3 +143,31 @@ async def test_gateway_creates_persistent_thread_session(tmp_path):
     mapping = db.fetch_one("SELECT thread_id, session_id FROM discord_thread_sessions")
     assert mapping["thread_id"] == "8"
     assert mapping["session_id"] == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_gateway_thread_reply_requires_mapping_and_reuses_session(tmp_path):
+    from types import SimpleNamespace
+    from virtizai_core.db import Database
+    from virtizai_core.discord import DiscordReply
+    import json
+    db = Database(tmp_path / "state.db")
+    db.open()
+    db.execute("UPDATE discord_config SET enabled=1, allow_dms=0, require_mentions=0, allowed_channels_json=? WHERE id='discord-default'", (json.dumps(["7"]),))
+    db.execute("INSERT INTO users(id, display_name) VALUES ('u1', 'Owner')")
+    db.execute("INSERT INTO sessions(id, user_id, title) VALUES ('s1', 'u1', 'Thread')")
+    db.execute("INSERT INTO interface_identities(id, user_id, interface_type, external_subject) VALUES ('i1', 'u1', 'discord', '42')")
+    db.execute("INSERT INTO discord_thread_sessions(thread_id, session_id, guild_id, parent_channel_id, user_id) VALUES ('8', 's1', '7', '7', 'u1')")
+    calls = []
+    class Adapter:
+        async def handle_message(self, user_id, content, session_key=None, session_id=None, display_name="Discord user"):
+            calls.append((session_key, session_id))
+            return DiscordReply("reply", "s1", {})
+    class Channel:
+        id = 8
+        parent_id = 7
+        async def send(self, value): pass
+    message = SimpleNamespace(author=SimpleNamespace(bot=False, id=42, display_name="Owner"), guild=SimpleNamespace(id=7), channel=Channel(), content="follow up", raw_mentions=[])
+    gateway = DiscordGateway(Adapter(), db, FileSecretStore(tmp_path / "secrets.json"))
+    assert await gateway.handle_message(message)
+    assert calls == [(None, "s1")]
