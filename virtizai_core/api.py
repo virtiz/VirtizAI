@@ -317,6 +317,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             await app.state.events.transition("provider", row["id"], row["name"], row["health_status"], initial=True)
         for row in database.fetch_all("SELECT m.id, m.name, p.name AS provider_name, m.status FROM models m JOIN providers p ON p.id=m.provider_id WHERE p.enabled=1"):
             await app.state.events.transition("model", row["id"], f"{row['provider_name']}:{row['name']}", row["status"], initial=True)
+        codex_bin = os.environ.get("VIRTIZAI_CODEX_BIN", "codex")
+        codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+        codex_state = "available" if shutil.which(codex_bin) and (codex_home / "auth.json").exists() else "unavailable"
+        await app.state.events.transition("worker", "codex_worker", "Codex CLI worker", codex_state, initial=True)
         try:
             yield
         finally:
