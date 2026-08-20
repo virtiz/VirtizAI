@@ -471,7 +471,10 @@ class CoreService:
                 try:
                     with self.telemetry.stage(request_id, "provider_inference"):
                         inference = await asyncio.wait_for(
-                            self.providers.chat(candidate.provider_id, candidate.model_name, recent_context + [{"role": "user", "content": content}], max_tokens=policy.output_token_budget()),
+                            # The current user message is already in recent_context after
+                            # persistence; appending it again doubled prompts and caused
+                            # avoidable Secretary timeouts.
+                            self.providers.chat(candidate.provider_id, candidate.model_name, recent_context, max_tokens=policy.output_token_budget()),
                             timeout=candidate_timeout,
                         )
                     route = candidate
