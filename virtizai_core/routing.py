@@ -72,6 +72,10 @@ class RoutingEngine:
     def __init__(self, database: Database) -> None:
         self.database = database
 
+    def role_id(self, role_name: str) -> str | None:
+        row = self.database.fetch_one("SELECT id FROM roles WHERE name = ? AND enabled = 1", (role_name,))
+        return row["id"] if row else None
+
     def eligible_routes(self, role_id: str, strategy: str = "priority") -> list[EligibleRoute]:
         rows = self.database.fetch_all(
             """

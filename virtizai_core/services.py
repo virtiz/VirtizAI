@@ -11,6 +11,7 @@ from .providers import ProviderRegistry
 from .routing import RoutingEngine
 from .telemetry import TelemetryService
 from .policy import CommunicationPolicy
+from .workers import TaskClassifier, CodexWorker
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class SecretaryResponse:
     usage_exact: bool | None = None
     estimated_cost: float | None = None
     job_created: bool = False
+    task_class: str = "simple"
 
 
 class SessionService:
@@ -115,6 +117,10 @@ class RouteResolver:
             return []
         return RoutingEngine(self.database).eligible_routes(role["id"], strategy)
 
+    def resolve_role(self, role_name: str, strategy: str = "priority") -> list:
+        role_id = RoutingEngine(self.database).role_id(role_name)
+        return RoutingEngine(self.database).eligible_routes(role_id, strategy) if role_id else []
+
 
 class CoreService:
     def __init__(
@@ -123,6 +129,7 @@ class CoreService:
         telemetry: TelemetryService,
         jobs: JobManager,
         providers: ProviderRegistry,
+        codex_worker: CodexWorker | None = None,
     ) -> None:
         self.database = database
         self.telemetry = telemetry
@@ -130,6 +137,8 @@ class CoreService:
         self.providers = providers
         self.sessions = SessionService(database)
         self.policy = IntentPolicyEngine()
+        self.classifier = TaskClassifier()
+        self.codex_worker = codex_worker
         self.routes = RouteResolver(database)
 
     async def handle_message(
@@ -152,24 +161,27 @@ class CoreService:
             if session is None:
                 raise LookupError("Session not found")
         with self.telemetry.stage(request_id, "intent_policy"):
-            intent = self.policy.classify(content)
+            classification = self.classifier.classify(content)
+            intent = classification.kind
         with self.telemetry.stage(request_id, "message_persist"):
             self.sessions.add_message(session_id, "user", content)
-        if intent == "delegated":
+        route = None
+        inference = None
+        job_created = False
+        if classification.kind == "hard":
             job_id = await self.jobs.submit(
-                "delegated_request",
-                {"content": content},
+                "codex_worker",
+                {"prompt": content},
                 user_id=user_id,
                 session_id=session_id,
             )
-            response_content = f"Delegated work accepted as job {job_id}."
-            route = None
+            response_content = f"Codex worker job accepted: {job_id}."
             job_created = True
         else:
-            with self.telemetry.stage(request_id, "secretary_route"):
-                candidates = self.routes.resolve_secretary()
-            route = None
-            inference = None
+            role_name = "secretary" if classification.kind == "simple" else "general-reasoning"
+            route_stage = "secretary_route" if classification.kind == "simple" else "medium_route"
+            with self.telemetry.stage(request_id, route_stage):
+                candidates = self.routes.resolve_role(role_name) if classification.kind == "medium" else self.routes.resolve_secretary()
             for candidate in candidates:
                 try:
                     with self.telemetry.stage(request_id, "provider_inference"):
@@ -179,11 +191,10 @@ class CoreService:
                 except Exception:
                     continue
             response_content = (
-                "Secretary route is ready; configure an eligible provider/model route."
+                f"{classification.kind.title()} route unavailable; configure an eligible provider/model route."
                 if route is None
                 else inference.content
             )
-            job_created = False
         latency_ms = (perf_counter() - started) * 1000
         message_id = self.sessions.add_message(
             session_id,
@@ -202,7 +213,7 @@ class CoreService:
                 "estimated_cost": inference.estimated_cost if inference else None,
             },
         )
-        self.telemetry.record_event(request_id, "request_complete", json.dumps({"intent": intent}))
+        self.telemetry.record_event(request_id, "request_complete", json.dumps({"intent": intent, "task_class": classification.kind, "classification_reason": classification.reason, "worker": "codex" if classification.kind == "hard" else None}))
         return SecretaryResponse(
             request_id=request_id,
             session_id=session_id,
@@ -221,4 +232,5 @@ class CoreService:
             usage_exact=inference.usage_exact if inference else None,
             estimated_cost=inference.estimated_cost if inference else None,
             job_created=job_created,
+            task_class=classification.kind,
         )

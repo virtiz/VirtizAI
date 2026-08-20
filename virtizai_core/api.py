@@ -38,6 +38,7 @@ from .retention import RetentionService
 from .interfaces import InterfaceRequest, InterfaceService
 from .discord import DiscordAdapter
 from .discord_gateway import DiscordGateway
+from .workers import CodexWorker
 from .secrets import FileSecretStore
 from .transactions import StartupTransactionReconciler
 from .updates import NativeUpdateHelper, StartupUpdateReconciler, UpdateCoordinator, UpdateFailure
@@ -274,7 +275,9 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     jobs = JobManager(database)
     providers = ProviderRegistry(database)
     providers.restore_adapters()
-    core = CoreService(database, telemetry, jobs, providers)
+    codex_worker = CodexWorker(app_config.workspace_dir)
+    jobs.register_handler("codex_worker", codex_worker.run)
+    core = CoreService(database, telemetry, jobs, providers, codex_worker)
     app.state.auth = AuthAdminService(database)
     app.state.context = ContextBroker(database)
     app.state.execution = ExecutionManager(database, app_config.workspace_dir)
@@ -666,7 +669,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.post("/v1/jobs/{job_id}/cancel")
     async def cancel_job(job_id: str) -> dict:
-        cancelled = app.state.execution.cancel(job_id)
+        cancelled = app.state.execution.cancel(job_id) or jobs.cancel(job_id)
         return {"job_id": job_id, "cancel_requested": cancelled}
 
     @app.get("/v1/activity")

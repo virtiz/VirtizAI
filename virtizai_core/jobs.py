@@ -53,10 +53,17 @@ class JobManager:
             if handler is None:
                 raise LookupError(f"No handler registered for job kind: {kind}")
             result = await handler(job_id, payload)
+            final_status = "succeeded" if result.get("status") in {None, "succeeded"} else "failed"
             self.database.execute(
-                "UPDATE jobs SET status = 'succeeded', result_json = ?, finished_at = ? WHERE id = ?",
-                (json.dumps(result), now_iso(), job_id),
+                "UPDATE jobs SET status = ?, result_json = ?, finished_at = ? WHERE id = ?",
+                (final_status, json.dumps(result), now_iso(), job_id),
             )
+        except asyncio.CancelledError:
+            self.database.execute(
+                "UPDATE jobs SET status = 'cancelled', result_json = ?, finished_at = ? WHERE id = ?",
+                (json.dumps({"worker": kind, "status": "cancelled"}), now_iso(), job_id),
+            )
+            raise
         except Exception as exc:
             self.database.execute(
                 "UPDATE jobs SET status = 'failed', result_json = ?, finished_at = ? WHERE id = ?",
@@ -69,6 +76,13 @@ class JobManager:
         row = self.database.fetch_one("SELECT * FROM jobs WHERE id = ?", (job_id,))
         return dict(row) if row else None
 
+    def cancel(self, job_id: str) -> bool:
+        task = self.tasks.get(job_id)
+        if task is None:
+            return False
+        task.cancel()
+        return True
+
     async def wait_for_idle(self) -> None:
         if self.tasks:
-            await asyncio.gather(*list(self.tasks.values()))
+            await asyncio.gather(*list(self.tasks.values()), return_exceptions=True)
