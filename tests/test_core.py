@@ -147,3 +147,20 @@ async def test_identity_introspection_uses_session_execution_metadata(tmp_path: 
             "SELECT metadata_json FROM messages WHERE id = ?", (response.json()["message_id"],)
         )
         assert json.loads(row["metadata_json"])["execution_type"] == "system"
+
+
+@pytest.mark.asyncio
+async def test_previous_deterministic_response_identity_and_natural_variants(tmp_path: Path) -> None:
+    app = create_app(make_config(tmp_path))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/v1/sessions", json={"user_id": "identity-previous"})
+        session_id = created.json()["session_id"]
+        first = await client.post(f"/v1/sessions/{session_id}/messages", json={"user_id": "identity-previous", "content": "What is your current routing setup?"})
+        assert first.json()["output_tokens"] is None
+        second = await client.post(f"/v1/sessions/{session_id}/messages", json={"user_id": "identity-previous", "content": "Which model answered that last message?"})
+        assert "generated directly by VirtizAI introspection" in second.json()["content"]
+        assert "Tokens: 0" in second.json()["content"]
+        assert second.json()["output_tokens"] is None
+        assert app.state.core.introspection.is_identity_question("what provider answered that?")
+        assert app.state.core.introspection.is_identity_question("did you use the fallback?")
+        assert app.state.core.introspection.is_identity_question("what model generated your last response?")

@@ -58,7 +58,24 @@ class IntrospectionService:
 
     def matches(self, content: str) -> bool:
         text = content.strip().lower()
-        return any(signal in text for signal in self._signals)
+        return self.is_identity_question(text) or any(signal in text for signal in self._signals)
+
+    def identity_kind(self, content: str) -> str | None:
+        text = content.strip().lower()
+        if not self.is_identity_question(text):
+            return None
+        if any(term in text for term in ("last message", "previous response", "that message", "last response", "previous request")):
+            return "previous_response"
+        if any(term in text for term in ("last inference", "actual model", "last model", "most recent model", "last request")):
+            return "last_inference"
+        return "current"
+
+    def is_identity_question(self, content: str) -> bool:
+        text = content.strip().lower()
+        targets = ("model", "provider", "worker", "agent", "route", "local", "cloud", "codex", "qwen", "phi", "fallback")
+        verbs = ("answer", "answered", "respond", "responded", "responding", "handled", "handle", "use", "used", "using", "generated", "ran", "run", "do that")
+        temporal = ("current", "right now", "now", "last", "previous", "that message", "that", "me", "you")
+        return any(t in text for t in targets) and any(v in text for v in verbs) and any(t in text for t in temporal)
 
     def _target(self, row: dict, eligible: set[tuple[str, str]]) -> str:
         key = (row["provider_id"], row["model_id"])
@@ -106,52 +123,59 @@ class IntrospectionService:
         result["routes"]["hard_fallback"] = [{"provider": "NeuralWatt", "status": "configured" if any(p["name"] == "NeuralWatt" for p in result["providers"]) else "not configured"}]
         return result
 
+    def _metadata_row(self, row) -> dict:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            metadata = {}
+        return {**metadata, "created_at": row["created_at"]}
+
+    def _previous_assistant(self, session_id: str | None) -> dict | None:
+        if not session_id:
+            return None
+        row = self.database.fetch_one("SELECT provider_id, model_id, metadata_json, created_at FROM messages WHERE session_id=? AND role='assistant' ORDER BY rowid DESC LIMIT 1", (session_id,))
+        return self._metadata_row(row) if row else None
+
     def _last_inference(self, session_id: str | None) -> dict | None:
         if not session_id:
             return None
         row = self.database.fetch_one("SELECT provider_id, model_id, metadata_json, created_at FROM messages WHERE session_id=? AND role='assistant' ORDER BY rowid DESC LIMIT 50", (session_id,))
         if row is None:
             return None
-        try:
-            metadata = json.loads(row["metadata_json"] or "{}")
-        except (TypeError, ValueError):
-            metadata = {}
+        metadata = self._metadata_row(row)
         if metadata.get("execution_type") not in {"inference", "worker"}:
             return self._last_inference_for_older_message(session_id)
-        return {**metadata, "created_at": row["created_at"]}
+        return metadata
 
     def _last_inference_for_older_message(self, session_id: str) -> dict | None:
         for row in self.database.fetch_all("SELECT provider_id, model_id, metadata_json, created_at FROM messages WHERE session_id=? AND role='assistant' ORDER BY rowid DESC LIMIT 50", (session_id,)):
-            try:
-                metadata = json.loads(row["metadata_json"] or "{}")
-            except (TypeError, ValueError):
-                metadata = {}
+            metadata = self._metadata_row(row)
             if metadata.get("execution_type") in {"inference", "worker"}:
-                return {**metadata, "created_at": row["created_at"]}
+                return metadata
         return None
 
-    def is_identity_question(self, content: str) -> bool:
-        text = content.strip().lower()
-        return any(signal in text for signal in (
-            "which model is responding", "what model answered", "what provider handled",
-            "was that local or cloud", "did you use a fallback", "why did you use phi",
-            "did qwen fail", "which agent answered", "what handled the last request",
-            "what model are you using",
-        ))
 
     def render(self, session_id: str | None = None, identity: bool = False) -> str:
         if identity:
-            last = self._last_inference(session_id)
+            kind = identity if isinstance(identity, str) else "current"
+            record = self._previous_assistant(session_id) if kind == "previous_response" else self._last_inference(session_id)
+            if kind == "previous_response":
+                if not record or record.get("execution_type") == "system":
+                    return "That response was generated directly by VirtizAI introspection. No model was used. Tokens: 0."
             lines = ["This response is being generated directly by VirtizAI without an LLM call."]
-            if not last:
+            if not record:
                 lines.append("There is no prior model or worker inference recorded in this session.")
                 return "\n".join(lines)
-            target = last.get("worker") or (f"{last.get('provider_name')}:{last.get('model_name')}" if last.get("provider_name") and last.get("model_name") else "unknown execution target")
-            lines.append(f"The most recent execution in this session used: {target}.")
-            if last.get("fallback_used"):
-                lines.append(f"It used the configured fallback because {last.get('fallback_reason') or 'the primary route was unavailable'}.")
-            elif last.get("provider_name"):
-                lines.append(f"Local/cloud classification: {last.get('locality') or 'unknown'}.")
+            target = record.get("worker") or (f"{record.get('provider_name')}:{record.get('model_name')}" if record.get("provider_name") and record.get("model_name") else "unknown execution target")
+            if kind == "current":
+                lines = ["This response is being generated directly by VirtizAI without an LLM call.", f"The most recent actual inference in this session used: {target}."]
+            else:
+                prefix = "The most recent actual inference in this session used" if kind == "last_inference" else "That response used"
+                lines = [f"{prefix}: {target}."]
+            if record.get("fallback_used"):
+                lines.append(f"It used the configured fallback because {record.get('fallback_reason') or 'the primary route was unavailable'}.")
+            elif record.get("provider_name"):
+                lines.append(f"Local/cloud classification: {record.get('locality') or 'unknown'}.")
             return "\n".join(lines)
         snapshot = self.snapshot()
         lines = ["Current VirtizAI routing configuration:"]
@@ -301,8 +325,8 @@ class CoreService:
             intent = classification.kind
         if self.introspection.matches(content):
             self.sessions.add_message(session_id, "user", content)
-            identity = self.introspection.is_identity_question(content)
-            response_content = self.introspection.render(session_id, identity=identity)
+            identity = self.introspection.identity_kind(content)
+            response_content = self.introspection.render(session_id, identity=identity or False)
             message_id = self.sessions.add_message(session_id, "assistant", response_content, {
                 "execution_type": "system", "role": "secretary", "task_class": "simple",
                 "tokens": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
