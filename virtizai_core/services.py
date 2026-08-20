@@ -335,6 +335,36 @@ class CoreService:
         self.events = events
         self.routes = RouteResolver(database)
 
+    async def _secretary_candidates(self) -> list:
+        """Resolve the fast route and automatically re-probe cooled-down models."""
+        route_candidates = self.routes.resolve_secretary()
+        stale = self.database.fetch_all(
+            """SELECT DISTINCT rt.provider_id FROM routes r
+               JOIN route_targets rt ON rt.route_id=r.id
+               JOIN models m ON m.id=rt.model_id
+               WHERE r.role_id='role-secretary' AND r.enabled=1
+                 AND m.status='error' AND m.updated_at <= datetime('now', '-30 seconds')"""
+        )
+        provider_ids = {row["provider_id"] for row in stale}
+        if not route_candidates or provider_ids:
+            for provider_id in provider_ids:
+                try:
+                    before = {
+                        row["id"]: row["status"]
+                        for row in self.database.fetch_all("SELECT id,status FROM models WHERE provider_id=?", (provider_id,))
+                    }
+                    await self.providers.discover_models(provider_id)
+                    if self.events is not None:
+                        for model_id, previous in before.items():
+                            current = self.database.fetch_one("SELECT status FROM models WHERE id=?", (model_id,))
+                            if previous == "error" and current and current["status"] in {"available", "warm", "cold", "loading"}:
+                                row = self.database.fetch_one("SELECT p.name provider,m.name model FROM models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?", (model_id,))
+                                await self.events.transition("model", model_id, f"{row['provider']}:{row['model']}", "available", None, "info")
+                except Exception:
+                    continue
+            route_candidates = self.routes.resolve_secretary()
+        return route_candidates
+
     async def handle_message(
         self,
         user_id: str,
@@ -390,6 +420,7 @@ class CoreService:
         job_created = False
         job_id = None
         fallback_reason = None
+        attempt_failures: list[dict[str, str]] = []
         recent_context = [
             {"role": row["role"], "content": row["content"]}
             for row in self.database.fetch_all(
@@ -410,17 +441,26 @@ class CoreService:
             role_name = "secretary" if classification.kind == "simple" else "general-reasoning"
             route_stage = "secretary_route" if classification.kind == "simple" else "medium_route"
             with self.telemetry.stage(request_id, route_stage):
-                candidates = self.routes.resolve_role(role_name) if classification.kind == "medium" else self.routes.resolve_secretary()
+                candidates = self.routes.resolve_role(role_name) if classification.kind == "medium" else await self._secretary_candidates()
+            total_budget = float(os.environ.get(
+                "VIRTIZAI_SECRETARY_TIMEOUT_SECONDS" if classification.kind == "simple" else "VIRTIZAI_MEDIUM_TIMEOUT_SECONDS",
+                "15" if classification.kind == "simple" else "120",
+            ))
+            attempt_budget = float(os.environ.get(
+                "VIRTIZAI_SECRETARY_ATTEMPT_TIMEOUT_SECONDS" if classification.kind == "simple" else "VIRTIZAI_MEDIUM_ATTEMPT_TIMEOUT_SECONDS",
+                "8" if classification.kind == "simple" else "120",
+            ))
+            deadline = perf_counter() + total_budget
             for candidate in candidates:
+                remaining = deadline - perf_counter()
+                if remaining <= 0:
+                    break
+                candidate_timeout = min(attempt_budget, remaining)
                 try:
                     with self.telemetry.stage(request_id, "provider_inference"):
-                        execution_budget = float(os.environ.get(
-                            "VIRTIZAI_SECRETARY_TIMEOUT_SECONDS" if classification.kind == "simple" else "VIRTIZAI_MEDIUM_TIMEOUT_SECONDS",
-                            "12" if classification.kind == "simple" else "120",
-                        ))
                         inference = await asyncio.wait_for(
                             self.providers.chat(candidate.provider_id, candidate.model_name, recent_context + [{"role": "user", "content": content}], max_tokens=policy.output_token_budget()),
-                            timeout=execution_budget,
+                            timeout=candidate_timeout,
                         )
                     route = candidate
                     if self.events is not None:
@@ -431,20 +471,24 @@ class CoreService:
                     )
                     break
                 except Exception as exc:
+                    reason = str(exc).strip() or f"timed out after {candidate_timeout:.1f}s"
                     if fallback_reason is None:
-                        fallback_reason = str(exc)[:300]
+                        fallback_reason = reason
+                    attempt_failures.append({"provider": candidate.provider_name, "model": candidate.model_name, "reason": reason})
                     if self.events is not None:
-                        await self.events.transition("model", candidate.model_id, f"{candidate.provider_name}:{candidate.model_name}", "unavailable", str(exc)[:300], "error")
+                        await self.events.transition("model", candidate.model_id, f"{candidate.provider_name}:{candidate.model_name}", "degraded", reason, "warning")
                     self.database.execute(
                         "UPDATE models SET status='error', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                        (str(exc)[:300], candidate.model_id),
+                        (reason, candidate.model_id),
                     )
                     continue
-            response_content = (
-                f"{classification.kind.title()} route unavailable; configure an eligible provider/model route."
-                if route is None
-                else inference.content
-            )
+            if route is None and attempt_failures:
+                label = "Secretary" if classification.kind == "simple" else classification.kind.title()
+                response_content = f"{label} routes failed:\n" + "\n".join(
+                    f"- {item['provider']}:{item['model']}: {item['reason']}" for item in attempt_failures
+                )
+            else:
+                response_content = f"{classification.kind.title()} route unavailable; configure an eligible provider/model route." if route is None else inference.content
         latency_ms = (perf_counter() - started) * 1000
         message_id = self.sessions.add_message(
             session_id,
@@ -464,6 +508,7 @@ class CoreService:
                 "locality": "local" if route and route.provider_name and "NeuralWatt" not in route.provider_name else ("cloud" if route else None),
                 "fallback_used": bool(route and getattr(route, "ordinal", 0) > 0),
                 "fallback_reason": fallback_reason,
+                "attempt_failures": attempt_failures,
                 "latency_ms": latency_ms,
                 "ttft_ms": inference.ttft_ms if inference else None,
                 "input_tokens": inference.input_tokens if inference else 0,

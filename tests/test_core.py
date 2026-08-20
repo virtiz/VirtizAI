@@ -13,6 +13,9 @@ from virtizai_core.config import AppConfig
 from virtizai_core.db import Database
 from virtizai_core.jobs import JobManager
 from virtizai_core.secrets import EnvironmentSecretStore, MemorySecretStore
+from virtizai_core.providers import ProviderRegistry
+from virtizai_core.services import CoreService
+from virtizai_core.telemetry import TelemetryService
 
 
 def make_config(tmp_path: Path) -> AppConfig:
@@ -194,3 +197,35 @@ async def test_unsupported_restart_action_is_truthful_and_zero_token(tmp_path: P
         row = app.state.database.fetch_one("SELECT metadata_json FROM messages WHERE id = ?", (body["message_id"],))
         metadata = json.loads(row["metadata_json"])
         assert metadata["action_executed"] is False
+
+
+@pytest.mark.asyncio
+async def test_secretary_primary_failure_attempts_fallback_and_records_reason(tmp_path: Path) -> None:
+    database = Database(tmp_path / "state.db")
+    database.open()
+    registry = ProviderRegistry(database)
+    primary = registry.install_mock_provider("Primary", ["phi"], fail=True)
+    fallback = registry.install_mock_provider("Fallback", ["hermes"], fail=False)
+    registry.adapters[primary].fail = False
+    await registry.discover_models(primary)
+    registry.adapters[primary].fail = True
+    await registry.discover_models(fallback)
+    primary_model = database.fetch_one("SELECT id FROM models WHERE provider_id=?", (primary,))["id"]
+    fallback_model = database.fetch_one("SELECT id FROM models WHERE provider_id=?", (fallback,))["id"]
+    database.execute("UPDATE providers SET health_status='healthy'")
+    database.execute("INSERT INTO routes(id,name,role_id,priority,policy_json) VALUES ('secretary-fallback','Secretary fallback','role-secretary',10,'{}')")
+    database.execute("INSERT INTO route_targets(route_id,provider_id,model_id,ordinal) VALUES ('secretary-fallback',?,?,0)", (primary, primary_model))
+    database.execute("INSERT INTO route_targets(route_id,provider_id,model_id,ordinal) VALUES ('secretary-fallback',?,?,1)", (fallback, fallback_model))
+    core = CoreService(database, TelemetryService(database), JobManager(database), registry)
+    core.sessions.ensure_user("fallback-user")
+    session_id = core.sessions.create_session("fallback-user")
+    response = await core.handle_message("fallback-user", session_id, "hello")
+    assert response.provider_name == "Fallback"
+    assert response.model_name == "hermes"
+    assert response.content.startswith("Fallback")
+    row = database.fetch_one("SELECT metadata_json FROM messages WHERE id=?", (response.message_id,))
+    metadata = json.loads(row["metadata_json"])
+    assert metadata["fallback_used"] is True
+    assert metadata["fallback_reason"]
+    assert metadata["attempt_failures"][0]["model"] == "phi"
+    database.close()
