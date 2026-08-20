@@ -439,7 +439,15 @@ class CoreService:
                 "SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 11",
                 (session_id,),
             )
-        ][::-1]
+            ][::-1]
+        if classification.kind == "simple":
+            # Keep the interactive Secretary path concise so local inference
+            # can complete within its measured latency budget.  This is a
+            # routing/policy hint, not an owner-specific model instruction.
+            recent_context.insert(0, {
+                "role": "system",
+                "content": "Answer as a fast secretary. Be concise: use at most three short bullet points and no long preamble.",
+            })
         if classification.kind == "hard":
             job_id = await self.jobs.submit(
                 "codex_worker",
@@ -460,8 +468,16 @@ class CoreService:
             ))
             attempt_budget = float(os.environ.get(
                 "VIRTIZAI_SECRETARY_ATTEMPT_TIMEOUT_SECONDS" if classification.kind == "simple" else "VIRTIZAI_MEDIUM_ATTEMPT_TIMEOUT_SECONDS",
-                "8" if classification.kind == "simple" else "120",
+                "10" if classification.kind == "simple" else "120",
             ))
+            # Keep interactive Secretary generations bounded.  The normal
+            # communication policy allows up to 4096 tokens, which is useful
+            # for general reasoning but can make a short local request exceed
+            # the Secretary attempt budget before fallback is possible.
+            secretary_max_tokens = int(os.environ.get("VIRTIZAI_SECRETARY_MAX_TOKENS", "32"))
+            max_tokens = policy.output_token_budget(
+                default=secretary_max_tokens if classification.kind == "simple" else 8192
+            )
             deadline = perf_counter() + total_budget
             for candidate in candidates:
                 remaining = deadline - perf_counter()
@@ -474,7 +490,7 @@ class CoreService:
                             # The current user message is already in recent_context after
                             # persistence; appending it again doubled prompts and caused
                             # avoidable Secretary timeouts.
-                            self.providers.chat(candidate.provider_id, candidate.model_name, recent_context, max_tokens=policy.output_token_budget()),
+                            self.providers.chat(candidate.provider_id, candidate.model_name, recent_context, max_tokens=max_tokens),
                             timeout=candidate_timeout,
                         )
                     route = candidate
