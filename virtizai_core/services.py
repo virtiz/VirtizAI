@@ -45,7 +45,7 @@ class IntrospectionService:
     _signals = (
         "current routing", "routing configuration", "what model", "what providers",
         "secretary model", "fallback model", "what workers", "codex connected",
-        "provider configuration", "configured providers", "why are the local models",
+        "provider configuration", "configured providers", "why are the local models", "currently offline", "did anything go down", "which one is your secretary fallback", "what was the primary model",
         "which models are healthy", "why did you fall back", "why can't you use",
         "which providers are down", "status of the medium route", "why are models unavailable",
     )
