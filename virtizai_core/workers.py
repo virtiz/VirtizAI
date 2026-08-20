@@ -71,7 +71,7 @@ class CodexWorker:
         prompt = str(payload.get("prompt", "")).strip()
         if not prompt:
             return {"worker": "codex", "status": "failed", "reason": "empty_prompt", "workspace": str(workspace)}
-        argv = [self.executable, "exec", "--json", "--sandbox", "workspace-write", "--approve-for-me", prompt]
+        argv = [self.executable, "exec", "--json", "--approve-for-me", prompt]
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv, cwd=workspace, stdout=asyncio.subprocess.PIPE,
