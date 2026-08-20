@@ -20,9 +20,23 @@ class JobManager:
         self.database = database
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.handlers: dict[str, JobHandler] = {}
+        self.listeners: list[Callable[[dict], Awaitable[None]]] = []
 
     def register_handler(self, kind: str, handler: JobHandler) -> None:
         self.handlers[kind] = handler
+
+    def register_listener(self, listener: Callable[[dict], Awaitable[None]]) -> None:
+        self.listeners.append(listener)
+
+    async def _notify(self, job_id: str) -> None:
+        event = self.get(job_id)
+        if not event:
+            return
+        for listener in tuple(self.listeners):
+            try:
+                await listener(event)
+            except Exception:
+                continue
 
     async def submit(
         self,
@@ -58,17 +72,20 @@ class JobManager:
                 "UPDATE jobs SET status = ?, result_json = ?, finished_at = ? WHERE id = ?",
                 (final_status, json.dumps(result), now_iso(), job_id),
             )
+            await self._notify(job_id)
         except asyncio.CancelledError:
             self.database.execute(
                 "UPDATE jobs SET status = 'cancelled', result_json = ?, finished_at = ? WHERE id = ?",
                 (json.dumps({"worker": kind, "status": "cancelled"}), now_iso(), job_id),
             )
+            await self._notify(job_id)
             raise
         except Exception as exc:
             self.database.execute(
                 "UPDATE jobs SET status = 'failed', result_json = ?, finished_at = ? WHERE id = ?",
                 (json.dumps({"error": type(exc).__name__}), now_iso(), job_id),
             )
+            await self._notify(job_id)
         finally:
             self.tasks.pop(job_id, None)
 

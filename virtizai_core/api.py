@@ -50,6 +50,11 @@ class SessionCreate(BaseModel):
     title: str | None = None
 
 
+class SessionUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    archived: bool | None = None
+
+
 class MessageCreate(BaseModel):
     user_id: str = Field(min_length=1)
     content: str = Field(min_length=1, max_length=100_000)
@@ -299,7 +304,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.interfaces = InterfaceService(database, core)
     app.state.discord = DiscordAdapter(app.state.interfaces, app.state.updates)
     app.state.secrets = FileSecretStore(app_config.data_dir / "secrets.json")
-    app.state.discord_gateway = DiscordGateway(app.state.discord, database, app.state.secrets)
+    app.state.discord_gateway = DiscordGateway(app.state.discord, database, app.state.secrets, jobs)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -792,6 +797,52 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         core.sessions.ensure_user(request.user_id, request.display_name)
         session_id = core.sessions.create_session(request.user_id, request.title)
         return {"session_id": session_id, "user_id": request.user_id}
+
+    @app.get("/v1/sessions")
+    async def list_sessions(user_id: str | None = None, query: str | None = None, include_archived: bool = False) -> list[dict]:
+        clauses = []
+        params: list = []
+        if user_id:
+            clauses.append("user_id = ?")
+            params.append(user_id)
+        if not include_archived:
+            clauses.append("status != 'archived'")
+        if query:
+            clauses.append("(title LIKE ? OR id IN (SELECT session_id FROM messages WHERE content LIKE ?))")
+            pattern = f"%{query}%"
+            params.extend([pattern, pattern])
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return [dict(row) for row in database.fetch_all(
+            f"SELECT * FROM sessions{where} ORDER BY updated_at DESC LIMIT 100", tuple(params)
+        )]
+
+    @app.get("/v1/sessions/{session_id}")
+    async def get_session(session_id: str, include_messages: bool = True) -> dict:
+        session = database.fetch_one("SELECT * FROM sessions WHERE id = ?", (session_id,))
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        result = dict(session)
+        if include_messages:
+            result["messages"] = [dict(row) for row in database.fetch_all(
+                "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at, rowid", (session_id,)
+            )]
+        return result
+
+    @app.patch("/v1/sessions/{session_id}")
+    async def update_session(session_id: str, request: SessionUpdate) -> dict:
+        if database.fetch_one("SELECT id FROM sessions WHERE id = ?", (session_id,)) is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        fields, values = [], []
+        if request.title is not None:
+            fields.append("title = ?")
+            values.append(request.title)
+        if request.archived is not None:
+            fields.append("status = ?")
+            values.append("archived" if request.archived else "active")
+        if fields:
+            fields.append("updated_at = CURRENT_TIMESTAMP")
+            database.execute(f"UPDATE sessions SET {', '.join(fields)} WHERE id = ?", (*values, session_id))
+        return dict(database.fetch_one("SELECT * FROM sessions WHERE id = ?", (session_id,)))
 
     @app.post("/v1/sessions/{session_id}/messages")
     async def create_message(session_id: str, request: MessageCreate) -> dict:

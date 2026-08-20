@@ -38,16 +38,19 @@ class GatewayStatus:
 class DiscordGateway:
     """Discord Gateway transport over the shared VirtizAI DiscordAdapter."""
 
-    def __init__(self, adapter: DiscordAdapter, database, secret_store) -> None:
+    def __init__(self, adapter: DiscordAdapter, database, secret_store, jobs=None) -> None:
         self.adapter = adapter
         self.database = database
         self.secret_store = secret_store
+        self.jobs = jobs
         self.client = None
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._status = GatewayStatus("disabled")
         self._send_lock = asyncio.Lock()
         self.ignored_bot_ids = {item.strip() for item in os.environ.get("VIRTIZAI_DISCORD_IGNORED_BOT_IDS", "").split(",") if item.strip()}
+        if self.jobs is not None:
+            self.jobs.register_listener(self._on_job_complete)
 
     @staticmethod
     def _list(row, field: str) -> set[str]:
@@ -145,6 +148,38 @@ class DiscordGateway:
                 if self.client and not self.client.is_closed():
                     await self.client.close()
 
+    async def _on_job_complete(self, job: dict) -> None:
+        payload = json.loads(job.get("payload_json") or "{}")
+        notification = payload.get("notification") or {}
+        if notification.get("interface") != "discord":
+            return
+        thread_id = notification.get("thread_id")
+        session_id = job.get("session_id")
+        result = json.loads(job.get("result_json") or "{}")
+        status = job.get("status")
+        summary = result.get("summary") or result.get("message") or result.get("reason") or status
+        content = f"Codex worker {status}: {str(summary)[:1800]}"
+        if session_id:
+            self.adapter.interfaces.core.sessions.add_message(session_id, "assistant", content, {"route_id": "codex-worker"})
+        if self.client and thread_id:
+            channel = self.client.get_channel(int(thread_id))
+            if channel:
+                async with self._send_lock:
+                    await channel.send(content)
+
+    def _thread_mapping(self, thread_id: str):
+        return self.database.fetch_one("SELECT * FROM discord_thread_sessions WHERE thread_id = ?", (thread_id,))
+
+    async def _new_thread(self, message):
+        try:
+            await message.add_reaction("👀")
+        except Exception:
+            pass
+        try:
+            return await message.create_thread(name=f"VirtizAI • {str(message.content)[:60]}")
+        except Exception:
+            return None
+
     async def handle_message(self, message) -> bool:
         if getattr(message.author, "bot", False):
             return False
@@ -155,7 +190,8 @@ class DiscordGateway:
             return False
         guild = getattr(message, "guild", None)
         guild_id = str(guild.id) if guild else None
-        channel_id = str(message.channel.id)
+        channel = message.channel
+        channel_id = str(channel.id)
         user_id = str(message.author.id)
         if not self.is_allowed(guild_id=guild_id, channel_id=channel_id, user_id=user_id):
             return False
@@ -167,14 +203,42 @@ class DiscordGateway:
         )
         if text is None:
             return False
-        key_prefix = f"guild:{guild_id}" if guild_id else "dm"
-        session_key = f"{key_prefix}:channel:{channel_id}:user:{user_id}"
+        mapping = self._thread_mapping(channel_id)
+        is_thread = getattr(channel, "parent_id", None) is not None or mapping is not None
+        if not is_thread:
+            thread = await self._new_thread(message)
+            if thread is not None:
+                channel = thread
+                channel_id = str(thread.id)
+            session_key = (f"guild:{guild_id}:channel:{channel_id}:user:{user_id}" if thread is None else f"discord-thread:{channel_id}:user:{user_id}")
+            session_id = None
+        else:
+            session_key = None
+            session_id = mapping["session_id"] if mapping else None
         display_name = getattr(message.author, "display_name", "Discord user")
         try:
-            reply = await self.adapter.handle_message(user_id, text, session_key=session_key, display_name=display_name)
+            reply = await self.adapter.handle_message(user_id, text, session_key=session_key, session_id=session_id, display_name=display_name)
+            if reply.metadata.get("job_created"):
+                job = self.database.fetch_one(
+                    "SELECT id, payload_json FROM jobs WHERE session_id = ? ORDER BY created_at DESC LIMIT 1",
+                    (reply.session_id,),
+                )
+                if job:
+                    payload = json.loads(job["payload_json"] or "{}")
+                    payload.setdefault("notification", {}).update({"thread_id": channel_id, "interface": "discord"})
+                    self.database.execute("UPDATE jobs SET payload_json = ? WHERE id = ?", (json.dumps(payload), job["id"]))
+            if not mapping:
+                mapped_user = self.database.fetch_one("SELECT user_id FROM interface_identities WHERE interface_type='discord' AND external_subject=?", (user_id,))
+                if mapped_user:
+                    self.database.execute(
+                        """INSERT OR REPLACE INTO discord_thread_sessions
+                           (thread_id, session_id, guild_id, parent_channel_id, starter_message_id, user_id)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (channel_id, reply.session_id, guild_id, str(message.channel.id), str(message.id), mapped_user["user_id"]),
+                    )
             async with self._send_lock:
                 for chunk in self.response_chunks(reply.content):
-                    await message.channel.send(chunk)
+                    await channel.send(chunk)
         except Exception as exc:
             await self._set_status("connected", type(exc).__name__)
             _LOG.warning("Discord message handling failed: %s", type(exc).__name__)

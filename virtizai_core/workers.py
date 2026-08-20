@@ -71,7 +71,7 @@ class CodexWorker:
         prompt = str(payload.get("prompt", "")).strip()
         if not prompt:
             return {"worker": "codex", "status": "failed", "reason": "empty_prompt", "workspace": str(workspace)}
-        argv = [self.executable, "exec", "--json", "--full-auto", prompt]
+        argv = [self.executable, "exec", "--json", "--sandbox", "workspace-write", "--ask-for-approval", "never", prompt]
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv, cwd=workspace, stdout=asyncio.subprocess.PIPE,
@@ -84,7 +84,17 @@ class CodexWorker:
             return {"worker": "codex", "status": "timeout", "workspace": str(workspace)}
         output = stdout.decode(errors="replace")
         error = stderr.decode(errors="replace")
-        summary = output[-12000:] if output else error[-4000:]
+        # Keep worker results reviewable without returning raw command transcripts.
+        summaries = []
+        for line in output.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            item = event.get("item") or {}
+            if item.get("type") == "agent_message" and item.get("text"):
+                summaries.append(str(item["text"]))
+        summary = "\n".join(summaries)[-4000:] if summaries else (error[-1000:] if error else "Codex completed without a summary")
         return {
             "worker": "codex",
             "status": "succeeded" if process.returncode == 0 else "failed",

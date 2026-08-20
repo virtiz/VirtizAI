@@ -148,6 +148,8 @@ class CoreService:
         content: str,
         display_name: str = "User",
         policy: CommunicationPolicy | None = None,
+        interface_type: str | None = None,
+        notification: dict | None = None,
     ) -> SecretaryResponse:
         request_id = str(uuid.uuid4())
         policy = policy or CommunicationPolicy()
@@ -168,10 +170,17 @@ class CoreService:
         route = None
         inference = None
         job_created = False
+        recent_context = [
+            {"role": row["role"], "content": row["content"]}
+            for row in self.database.fetch_all(
+                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 11",
+                (session_id,),
+            )
+        ][::-1]
         if classification.kind == "hard":
             job_id = await self.jobs.submit(
                 "codex_worker",
-                {"prompt": content},
+                {"prompt": content, "notification": notification or {}, "interface_type": interface_type},
                 user_id=user_id,
                 session_id=session_id,
             )
@@ -185,7 +194,7 @@ class CoreService:
             for candidate in candidates:
                 try:
                     with self.telemetry.stage(request_id, "provider_inference"):
-                        inference = await self.providers.chat(candidate.provider_id, candidate.model_name, [{"role": "user", "content": content}], max_tokens=policy.output_token_budget())
+                        inference = await self.providers.chat(candidate.provider_id, candidate.model_name, recent_context + [{"role": "user", "content": content}], max_tokens=policy.output_token_budget())
                     route = candidate
                     break
                 except Exception:

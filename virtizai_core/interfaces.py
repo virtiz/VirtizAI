@@ -65,7 +65,11 @@ class InterfaceService:
         override = self.database.fetch_one("SELECT response_verbosity, execution_updates, tool_details FROM interface_preferences WHERE user_id = ? AND interface_type = ?", (user_id, request.interface_type))
         inherited = dict(override or base) if (override or base) else None
         policy = normalize_policy(request.response_verbosity, request.execution_updates, request.tool_details, CommunicationPolicy(**inherited) if inherited else None)
-        response = await self.core.handle_message(user_id, session_id, request.content, request.display_name, policy)
+        response = await self.core.handle_message(
+            user_id, session_id, request.content, request.display_name, policy,
+            request.interface_type,
+            {"interface": request.interface_type, "external_subject": request.external_subject},
+        )
         self.database.execute("INSERT INTO interface_events(interface_type, user_id, session_id, event_type, metadata_json) VALUES (?, ?, ?, 'message', ?)", (request.interface_type, user_id, session_id, json.dumps({"request_id": response.request_id})))
         return session_id, response
 

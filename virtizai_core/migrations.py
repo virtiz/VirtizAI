@@ -584,6 +584,28 @@ def migration_10(connection: sqlite3.Connection) -> None:
     )
 
 
+def migration_12(connection: sqlite3.Connection) -> None:
+    """Persist Discord thread/session relationships for restart-safe conversations."""
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS discord_thread_sessions (
+            thread_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            guild_id TEXT,
+            parent_channel_id TEXT NOT NULL,
+            starter_message_id TEXT,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_discord_thread_sessions_session
+            ON discord_thread_sessions(session_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_updated
+            ON sessions(updated_at DESC);
+        """
+    )
+
+
 def migration_11(connection: sqlite3.Connection) -> None:
     """Synthetic schema-transition fixture: schema-only state is incompatible with v10."""
     connection.executescript(
@@ -611,6 +633,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (9, migration_9),
     (10, migration_10),
     (11, migration_11),
+    (12, migration_12),
 )
 
 
