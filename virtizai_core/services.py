@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 import os
+import re
 import shutil
 from pathlib import Path
 from dataclasses import dataclass
@@ -58,25 +59,44 @@ class IntrospectionService:
         self.workspace_root = workspace_root
 
     def matches(self, content: str) -> bool:
-        text = content.strip().lower()
-        return self.is_identity_question(text) or any(signal in text for signal in self._signals)
+        text = self._normalized(content)
+        return self.is_identity_question(text) or any(self._has_phrase(text, signal) for signal in self._signals)
+
+    @staticmethod
+    def _normalized(content: str) -> str:
+        """Normalize to words so ``use`` cannot match ``useful`` or ``me`` fragments."""
+        return " ".join(re.findall(r"[a-z0-9]+", content.lower()))
+
+    @staticmethod
+    def _has_phrase(text: str, phrase: str) -> bool:
+        return f" {IntrospectionService._normalized(phrase)} " in f" {text} "
 
     def identity_kind(self, content: str) -> str | None:
-        text = content.strip().lower()
+        text = self._normalized(content)
         if not self.is_identity_question(text):
             return None
-        if any(term in text for term in ("last message", "previous response", "that message", "last response", "previous request")):
+        if any(self._has_phrase(text, term) for term in ("last message", "previous response", "that message", "last response", "previous request")):
             return "previous_response"
-        if any(term in text for term in ("last inference", "actual model", "last model", "most recent model", "last request")):
+        if any(self._has_phrase(text, term) for term in ("last inference", "actual model", "last model", "most recent model", "last request")):
             return "last_inference"
         return "current"
 
     def is_identity_question(self, content: str) -> bool:
-        text = content.strip().lower()
-        targets = ("model", "provider", "worker", "agent", "route", "local", "cloud", "codex", "qwen", "phi", "fallback")
-        verbs = ("answer", "answered", "respond", "responded", "responding", "handled", "handle", "use", "used", "using", "generated", "ran", "run", "do that")
-        temporal = ("current", "right now", "now", "last", "previous", "that message", "that", "me", "you")
-        return any(t in text for t in targets) and any(v in text for v in verbs) and any(t in text for t in temporal)
+        text = self._normalized(content)
+        tokens = set(text.split())
+        targets = {"model", "provider", "worker", "agent", "route", "inference", "local", "cloud", "codex", "qwen", "phi", "fallback"}
+        verbs = {"answer", "answered", "respond", "responded", "responding", "handled", "handle", "use", "used", "using", "generated", "ran", "run"}
+        interrogatives = {"what", "which", "who", "did", "was", "were", "is", "are", "can", "does"}
+        temporal = any(self._has_phrase(text, phrase) for phrase in ("current response", "right now", "last", "previous", "that", "that message", "last request", "last inference", "most recent"))
+        availability = bool(tokens & {"available", "unavailable", "healthy", "offline", "down", "configured", "connected"})
+        has_target = bool(tokens & targets)
+        has_verb = bool(tokens & verbs)
+        question_shape = bool(tokens & interrogatives)
+        # Identity requires a question/temporal relationship, not merely words
+        # such as "local" and "use" appearing in an ordinary request.
+        copula_execution = bool(tokens & {"is", "are", "was", "were"}) and temporal
+        return has_target and (((has_verb or copula_execution) and (temporal or question_shape)) or (availability and question_shape))
+
 
     def _target(self, row: dict, eligible: set[tuple[str, str]]) -> str:
         key = (row["provider_id"], row["model_id"])
@@ -191,6 +211,20 @@ class IntrospectionService:
                 lines.append(f"  {target} — {status}" + (f" ({reason})" if reason else ""))
         return "\n".join(lines)
 
+
+class OperationalActionDetector:
+    """Recognize unimplemented operational actions without pretending to execute them."""
+
+    _verbs = {"restart", "stop", "start", "deploy", "update", "delete", "modify", "create", "run"}
+    _targets = {"virtizai", "service", "gateway", "production", "prod", "dev", "development", "server", "container"}
+
+    @classmethod
+    def match(cls, content: str) -> str | None:
+        tokens = re.findall(r"[a-z0-9]+", content.lower())
+        if not tokens or tokens[0] not in cls._verbs or not set(tokens[1:]) & cls._targets:
+            return None
+        return tokens[0]
+
 class SessionService:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -296,6 +330,7 @@ class CoreService:
         self.policy = IntentPolicyEngine()
         self.classifier = TaskClassifier()
         self.introspection = IntrospectionService(database, Path(os.environ.get('VIRTIZAI_WORKSPACE_DIR', '/tmp/virtizai-workspace')))
+        self.actions = OperationalActionDetector()
         self.codex_worker = codex_worker
         self.events = events
         self.routes = RouteResolver(database)
@@ -324,6 +359,20 @@ class CoreService:
         with self.telemetry.stage(request_id, "intent_policy"):
             classification = self.classifier.classify(content)
             intent = classification.kind
+        action = self.actions.match(content)
+        if action:
+            self.sessions.add_message(session_id, "user", content)
+            response_content = f"I did not perform that {action} action because no authorized typed tool is configured for this session."
+            message_id = self.sessions.add_message(session_id, "assistant", response_content, {
+                "execution_type": "system", "role": "secretary", "task_class": "simple",
+                "action_requested": action, "action_executed": False,
+                "tokens": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+            })
+            self.telemetry.record_event(request_id, "request_complete", json.dumps({
+                "task_class": "simple", "execution_type": "system", "action_requested": action,
+                "action_executed": False, "tokens": 0,
+            }))
+            return SecretaryResponse(request_id, session_id, message_id, response_content, None, None, None, latency_ms=(perf_counter() - started) * 1000, task_class="simple")
         if self.introspection.matches(content):
             self.sessions.add_message(session_id, "user", content)
             identity = self.introspection.identity_kind(content)

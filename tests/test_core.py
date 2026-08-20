@@ -164,3 +164,33 @@ async def test_previous_deterministic_response_identity_and_natural_variants(tmp
         assert app.state.core.introspection.is_identity_question("what provider answered that?")
         assert app.state.core.introspection.is_identity_question("did you use the fallback?")
         assert app.state.core.introspection.is_identity_question("what model generated your last response?")
+
+
+def test_introspection_word_boundaries_reject_normal_local_ai_request(tmp_path: Path) -> None:
+    app = create_app(make_config(tmp_path))
+    introspection = app.state.core.introspection
+    assert not introspection.matches("Give me three short reasons local AI is useful in a homelab.")
+    assert not introspection.matches("Help me use a local model.")
+    assert not introspection.matches("Explain why local AI is useful.")
+    assert introspection.matches("Which model answered that last message?")
+    assert introspection.matches("What provider handled my previous response?")
+    assert introspection.matches("Is Codex available?")
+
+
+@pytest.mark.asyncio
+async def test_unsupported_restart_action_is_truthful_and_zero_token(tmp_path: Path) -> None:
+    app = create_app(make_config(tmp_path))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/v1/sessions", json={"user_id": "action-user"})
+        session_id = created.json()["session_id"]
+        response = await client.post(
+            f"/v1/sessions/{session_id}/messages",
+            json={"user_id": "action-user", "content": "Restart dev VirtizAI"},
+        )
+        body = response.json()
+        assert "did not perform" in body["content"]
+        assert "restarted" not in body["content"].lower()
+        assert body["output_tokens"] is None
+        row = app.state.database.fetch_one("SELECT metadata_json FROM messages WHERE id = ?", (body["message_id"],))
+        metadata = json.loads(row["metadata_json"])
+        assert metadata["action_executed"] is False
