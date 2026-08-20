@@ -45,7 +45,9 @@ class IntrospectionService:
     _signals = (
         "current routing", "routing configuration", "what model", "what providers",
         "secretary model", "fallback model", "what workers", "codex connected",
-        "provider configuration", "configured providers",
+        "provider configuration", "configured providers", "why are the local models",
+        "which models are healthy", "why did you fall back", "why can't you use",
+        "which providers are down", "status of the medium route", "why are models unavailable",
     )
 
     def __init__(self, database: Database, workspace_root: Path) -> None:
@@ -86,6 +88,7 @@ class IntrospectionService:
                 entries = [{
                     "role": role_name, "provider": row["provider_name"], "model": row["model_name"],
                     "status": "eligible" if (row["provider_id"], row["model_id"]) in eligible else "unavailable",
+                    "reason": row["last_error"] or (row["last_health_error"] if row["health_status"] not in {"healthy", "degraded"} else None),
                     "provider_health": row["health_status"], "model_status": row["model_status"],
                     "ordinal": row["ordinal"],
                 } for row in rows]
@@ -111,7 +114,8 @@ class IntrospectionService:
             for item in entries:
                 target = item.get("worker") or (f"{item.get('provider')}:{item.get('model')}" if item.get("model") else item.get("provider", "route"))
                 status = item.get("status", "unknown")
-                lines.append(f"  {target} — {status}")
+                reason = item.get("reason")
+                lines.append(f"  {target} — {status}" + (f" ({reason})" if reason else ""))
         return "\n".join(lines)
 
 
@@ -290,7 +294,7 @@ class CoreService:
                 except Exception as exc:
                     self.database.execute(
                         "UPDATE models SET status='error', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                        (type(exc).__name__, candidate.model_id),
+                        (str(exc)[:300], candidate.model_id),
                     )
                     continue
             response_content = (

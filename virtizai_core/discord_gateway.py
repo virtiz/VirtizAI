@@ -193,7 +193,20 @@ class DiscordGateway:
         channel = message.channel
         channel_id = str(channel.id)
         user_id = str(message.author.id)
-        if not self.is_allowed(guild_id=guild_id, channel_id=channel_id, user_id=user_id):
+        mapping = self._thread_mapping(channel_id)
+        # Threads are authorized through their persisted parent mapping, never by
+        # globally allowing arbitrary thread IDs.
+        if mapping:
+            identity = self.database.fetch_one(
+                "SELECT user_id FROM interface_identities WHERE interface_type='discord' AND external_subject=?",
+                (user_id,),
+            )
+            if (mapping["guild_id"] and mapping["guild_id"] != guild_id) or not identity or identity["user_id"] != mapping["user_id"]:
+                return False
+            auth_channel_id = mapping["parent_channel_id"]
+        else:
+            auth_channel_id = channel_id
+        if not self.is_allowed(guild_id=guild_id, channel_id=auth_channel_id, user_id=user_id):
             return False
         row = self.config()
         text = self.normalize_content(
@@ -203,7 +216,6 @@ class DiscordGateway:
         )
         if text is None:
             return False
-        mapping = self._thread_mapping(channel_id)
         is_thread = getattr(channel, "parent_id", None) is not None or mapping is not None
         if not is_thread:
             thread = await self._new_thread(message)

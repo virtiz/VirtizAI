@@ -80,6 +80,12 @@ class OllamaAdapter:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 return json.loads(response.read().decode())
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = exc.read().decode(errors="replace")
+            except Exception:
+                detail = str(exc)
+            raise AdapterError(detail[:500]) from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise AdapterError(str(exc)) from exc
 
