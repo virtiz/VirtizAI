@@ -102,3 +102,44 @@ async def test_gateway_ignores_explicit_dev_bot_mention(tmp_path: Path, monkeypa
     message = SimpleNamespace(author=SimpleNamespace(bot=False, id=42), guild=SimpleNamespace(id=7), channel=SimpleNamespace(id=0), content="<@1539768299389456465> use dev")
     gateway = DiscordGateway(Adapter(), db, FileSecretStore(tmp_path / "secrets.json"))
     assert await gateway.handle_message(message) is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_creates_persistent_thread_session(tmp_path):
+    from types import SimpleNamespace
+    from virtizai_core.db import Database
+    from virtizai_core.discord import DiscordReply
+    db = Database(tmp_path / "state.db")
+    db.open()
+    db.execute("UPDATE discord_config SET enabled=1, allow_dms=0, require_mentions=0 WHERE id='discord-default'")
+    db.execute("INSERT INTO users(id, display_name) VALUES ('u1', 'Owner')")
+    db.execute("INSERT INTO sessions(id, user_id, title) VALUES ('session-1', 'u1', 'Test')")
+    db.execute("INSERT INTO interface_identities(id, user_id, interface_type, external_subject) VALUES ('i1', 'u1', 'discord', '42')")
+    class Adapter:
+        async def handle_message(self, *args, **kwargs):
+            return DiscordReply("reply", "session-1", {"job_created": False})
+    class Channel:
+        id = 7
+        parent_id = None
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+    class Thread(Channel):
+        id = 8
+        parent_id = 7
+    class Message:
+        id = 9
+        content = "hello"
+        guild = SimpleNamespace(id=7)
+        author = SimpleNamespace(bot=False, id=42, display_name="Owner")
+        channel = Channel()
+        raw_mentions = []
+        def __init__(self): self.reactions = []
+        async def add_reaction(self, value): self.reactions.append(value)
+        async def create_thread(self, name): return Thread()
+    message = Message()
+    gateway = DiscordGateway(Adapter(), db, FileSecretStore(tmp_path / "secrets.json"))
+    assert await gateway.handle_message(message)
+    assert message.reactions == ["👀"]
+    mapping = db.fetch_one("SELECT thread_id, session_id FROM discord_thread_sessions")
+    assert mapping["thread_id"] == "8"
+    assert mapping["session_id"] == "session-1"
