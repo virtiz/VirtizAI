@@ -213,6 +213,7 @@ class CoreService:
         jobs: JobManager,
         providers: ProviderRegistry,
         codex_worker: CodexWorker | None = None,
+        events=None,
     ) -> None:
         self.database = database
         self.telemetry = telemetry
@@ -223,6 +224,7 @@ class CoreService:
         self.classifier = TaskClassifier()
         self.introspection = IntrospectionService(database, Path(os.environ.get('VIRTIZAI_WORKSPACE_DIR', '/tmp/virtizai-workspace')))
         self.codex_worker = codex_worker
+        self.events = events
         self.routes = RouteResolver(database)
 
     async def handle_message(
@@ -286,12 +288,16 @@ class CoreService:
                     with self.telemetry.stage(request_id, "provider_inference"):
                         inference = await self.providers.chat(candidate.provider_id, candidate.model_name, recent_context + [{"role": "user", "content": content}], max_tokens=policy.output_token_budget())
                     route = candidate
+                    if self.events is not None:
+                        await self.events.transition("model", candidate.model_id, f"{candidate.provider_name}:{candidate.model_name}", "available", None, "info")
                     self.database.execute(
                         "UPDATE models SET status='available', last_error=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                         (candidate.model_id,),
                     )
                     break
                 except Exception as exc:
+                    if self.events is not None:
+                        await self.events.transition("model", candidate.model_id, f"{candidate.provider_name}:{candidate.model_name}", "unavailable", str(exc)[:300], "error")
                     self.database.execute(
                         "UPDATE models SET status='error', last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
                         (str(exc)[:300], candidate.model_id),
