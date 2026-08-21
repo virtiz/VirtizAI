@@ -30,3 +30,4 @@ version = {attr = "virtizai_core.version.__version__"}
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+norecursedirs = ["browser"]

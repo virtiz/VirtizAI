@@ -19,3 +19,14 @@ def test_webui_exposes_real_setup_actions():
     assert "/discover" in app
     assert "route-target-select" in app or "data-route-model" in app
     assert "No demo providers are created" in app
+
+
+def test_webui_chat_uses_persistent_shared_sessions():
+    app = APP.read_text()
+    assert "New Chat" in app
+    assert "/v1/sessions" in app
+    assert "include_archived" in app
+    assert "archive-session" in app
+    assert "rename-session" in app
+    assert "/v1/interfaces/identity" in app
+    assert "localStorage.getItem('virtizai.webui.session')" in app

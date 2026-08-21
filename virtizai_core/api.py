@@ -522,6 +522,12 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             database.execute("INSERT INTO communication_preferences(user_id, response_verbosity, execution_updates, tool_details) VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET response_verbosity=excluded.response_verbosity, execution_updates=excluded.execution_updates, tool_details=excluded.tool_details", (request.user_id, request.response_verbosity, request.execution_updates, request.tool_details))
         return await get_preferences(request.user_id, request.interface_type)
 
+    @app.get("/v1/interfaces/identity")
+    async def interface_identity(interface_type: str, external_subject: str) -> dict:
+        """Resolve a public interface identity to its internal user for scoped session APIs."""
+        user_id = app.state.interfaces.resolve_user(interface_type, external_subject)
+        return {"interface_type": interface_type, "external_subject": external_subject, "user_id": user_id}
+
     @app.post("/v1/interfaces/message")
     async def interface_message(request: InterfaceMessage) -> dict:
         session_id, response = await app.state.interfaces.handle(InterfaceRequest(**request.model_dump()))
