@@ -377,6 +377,41 @@ class CoreService:
             route_candidates = self.routes.resolve_secretary()
         return route_candidates
 
+    async def plan_operational_action(self, content: str) -> dict | None:
+        """Interpret an action request into a closed, non-executing intent.
+
+        The model only proposes one of two typed values.  Authorization,
+        scope, confirmation, and execution remain in the gateway/tool layer;
+        model prose can never perform or confirm a destructive operation.
+        """
+        candidates = await self._secretary_candidates()
+        if not candidates:
+            return None
+        prompt = [
+            {"role": "system", "content": (
+                "Classify the user's request for VirtizAI's typed operational tools. "
+                "Return JSON only, exactly one object with action and confidence. "
+                "Allowed action values: discord_thread_cleanup, none. "
+                "Use discord_thread_cleanup only when the user is asking to remove, "
+                "prune, clean up, or delete Discord/server conversation threads. "
+                "Questions, explanations, and ordinary conversation are none. "
+                "Never claim that an action was executed. Example: "
+                '{\"action\":\"discord_thread_cleanup\",\"confidence\":0.98}'
+            )},
+            {"role": "user", "content": content},
+        ]
+        try:
+            inference = await asyncio.wait_for(
+                self.providers.chat(candidates[0].provider_id, candidates[0].model_name, prompt, max_tokens=48),
+                timeout=4.0,
+            )
+            match = re.search(r"\{\s*\"action\"\s*:\s*\"(discord_thread_cleanup|none)\".*?\"confidence\"\s*:\s*([0-9.]+).*?\}", inference.content, re.DOTALL)
+            if match and match.group(1) == "discord_thread_cleanup" and float(match.group(2)) >= 0.75:
+                return {"action": match.group(1), "confidence": float(match.group(2)), "model": candidates[0].model_name}
+        except Exception:
+            return None
+        return None
+
     async def handle_message(
         self,
         user_id: str,

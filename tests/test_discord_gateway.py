@@ -231,3 +231,33 @@ async def test_thread_cleanup_requires_scope_answers_and_explicit_confirmation(t
     assert await gateway.handle_message(message("CONFIRM DELETE"))
     assert thread.deleted
     assert "deleted 1" in channel.sent[-1]
+
+
+@pytest.mark.asyncio
+async def test_secretary_plans_natural_cleanup_before_confirmation(tmp_path):
+    from types import SimpleNamespace
+    from virtizai_core.db import Database
+
+    db = Database(tmp_path / "state.db")
+    db.open()
+    db.execute("UPDATE discord_config SET enabled=1, allow_dms=0, require_mentions=0, allowed_servers_json=?, allowed_channels_json=? WHERE id='discord-default'", (json.dumps(["guild"]), json.dumps(["channel"])))
+
+    class Core:
+        async def plan_operational_action(self, content):
+            assert "clean up" in content
+            return {"action": "discord_thread_cleanup", "confidence": 0.98}
+
+    class Adapter:
+        interfaces = SimpleNamespace(core=Core())
+
+    class Channel:
+        id = "channel"
+        parent_id = None
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+
+    channel = Channel()
+    message = SimpleNamespace(author=SimpleNamespace(bot=False, id="user", display_name="Owner"), guild=SimpleNamespace(id="guild"), channel=channel, content="can you clean up the conversation threads", raw_mentions=[])
+    gateway = DiscordGateway(Adapter(), db, FileSecretStore(tmp_path / "secrets.json"))
+    assert await gateway.handle_message(message)
+    assert "Before I delete anything" in channel.sent[-1]

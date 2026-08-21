@@ -110,6 +110,11 @@ class DiscordGateway:
         return bool(tokens & {"delete", "remove", "prune", "clean"}) and bool(tokens & {"thread", "threads"}) and bool(tokens & {"server", "guild", "discord"})
 
     @staticmethod
+    def _thread_action_candidate(text: str) -> bool:
+        tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+        return bool(tokens & {"delete", "remove", "prune", "clean", "cleanup"}) and bool(tokens & {"thread", "threads", "server", "guild", "discord"})
+
+    @staticmethod
     def _cleanup_answers(text: str) -> dict[str, str]:
         lowered = text.lower()
         compact = lowered.strip()
@@ -135,10 +140,10 @@ class DiscordGateway:
             for chunk in self.response_chunks(content):
                 await channel.send(chunk)
 
-    async def _thread_cleanup_flow(self, message, guild_id: str, user_id: str, text: str) -> bool:
+    async def _thread_cleanup_flow(self, message, guild_id: str, user_id: str, text: str, recognized: bool = False) -> bool:
         key = (guild_id, user_id)
         pending = self._thread_cleanup_pending.get(key)
-        if pending is None and not self._thread_cleanup_requested(text):
+        if pending is None and not recognized and not self._thread_cleanup_requested(text):
             return False
         if pending is None:
             self._thread_cleanup_pending[key] = {"stage": "questions", "channel_id": str(message.channel.id)}
@@ -343,8 +348,25 @@ class DiscordGateway:
         )
         if text is None:
             return False
-        if guild_id is not None and await self._thread_cleanup_flow(message, guild_id, user_id, text):
-            return True
+        if guild_id is not None and ((guild_id, user_id) in self._thread_cleanup_pending or self._thread_action_candidate(text)):
+            if (guild_id, user_id) in self._thread_cleanup_pending:
+                await self._thread_cleanup_flow(message, guild_id, user_id, text)
+                return True
+            # Let the configured Secretary interpret natural language first;
+            # the result is only a typed proposal.  The cleanup flow still
+            # performs scope checks and explicit confirmation before deletion.
+            planner = getattr(getattr(self.adapter, "interfaces", None), "core", None)
+            planned = None
+            if planner is not None and hasattr(planner, "plan_operational_action"):
+                try:
+                    planned = await planner.plan_operational_action(text)
+                except Exception:
+                    planned = None
+            if planned and planned.get("action") == "discord_thread_cleanup":
+                await self._thread_cleanup_flow(message, guild_id, user_id, text, recognized=True)
+                return True
+            if await self._thread_cleanup_flow(message, guild_id, user_id, text):
+                return True
         is_thread = getattr(channel, "parent_id", None) is not None or mapping is not None
         if not is_thread:
             thread = await self._new_thread(message)
