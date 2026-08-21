@@ -383,6 +383,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             "status": "ok",
             "application": "VirtizAI",
             "version": app_config.app_version,
+            "deployment": app_config.deployment,
+            "source_commit": app_config.source_commit,
             "schema_version": schema_version,
         }
 

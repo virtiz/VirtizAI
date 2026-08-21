@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,8 @@ class AppConfig:
     log_dir: Path
     database_path: Path
     app_version: str = __version__
+    deployment: str = "release"
+    source_commit: str | None = None
 
     @classmethod
     def from_environment(cls) -> "AppConfig":
@@ -25,12 +28,24 @@ class AppConfig:
         database_path = Path(
             os.environ.get("VIRTIZAI_DATABASE_PATH", str(data_dir / "virtizai.db"))
         )
+        deployment = os.environ.get("VIRTIZAI_DEPLOYMENT", "release").strip().lower()
+        source_commit = os.environ.get("VIRTIZAI_SOURCE_COMMIT")
+        if deployment in {"dev", "development", "source"} and not source_commit:
+            try:
+                source_commit = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=Path.cwd(), text=True, stderr=subprocess.DEVNULL).strip() or None
+            except (OSError, subprocess.CalledProcessError):
+                source_commit = None
+        app_version = os.environ.get("VIRTIZAI_APP_VERSION", __version__)
+        if deployment in {"dev", "development", "source"}:
+            app_version = f"{app_version}-dev+{source_commit}" if source_commit else f"{app_version}-dev"
         return cls(
             data_dir=data_dir,
             workspace_dir=workspace_dir,
             log_dir=log_dir,
             database_path=database_path,
-            app_version=os.environ.get("VIRTIZAI_APP_VERSION", __version__),
+            app_version=app_version,
+            deployment=deployment,
+            source_commit=source_commit,
         )
 
     def ensure_directories(self) -> None:
