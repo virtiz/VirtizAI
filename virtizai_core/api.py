@@ -285,6 +285,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     providers.restore_adapters()
     app.state.events = OperationalEventService(database)
     codex_worker = CodexWorker(app_config.workspace_dir)
+    app.state.codex_worker = codex_worker
     jobs.register_handler("codex_worker", codex_worker.run)
     core = CoreService(database, telemetry, jobs, providers, codex_worker, app.state.events)
     app.state.auth = AuthAdminService(database)
@@ -682,6 +683,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         database.execute("UPDATE environment_targets SET capabilities_json = ? WHERE id = ?", (json.dumps(request.capabilities), target_id))
         return dict(database.fetch_one("SELECT * FROM environment_targets WHERE id = ?", (target_id,)))
 
+    @app.delete("/v1/environments/{target_id}")
+    async def delete_environment(target_id: str) -> dict:
+        if database.fetch_one("SELECT id FROM environment_targets WHERE id=?", (target_id,)) is None:
+            raise HTTPException(status_code=404, detail="Environment not found")
+        database.execute("DELETE FROM environment_targets WHERE id=?", (target_id,))
+        return {"deleted": target_id}
+
     @app.get("/v1/memory")
     async def list_memory(user_id: str | None = None, project_id: str | None = None, query: str | None = None) -> list[dict]:
         rows = app.state.memory.list(user_id, project_id)
@@ -961,6 +969,22 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             request.session_id,
         )
         return {"job_id": job_id, "status": "queued"}
+
+    @app.get("/v1/agents")
+    async def list_agents() -> list[dict]:
+        roles = [dict(row) for row in database.fetch_all("SELECT * FROM roles ORDER BY name")]
+        for role in roles:
+            route = database.fetch_one("SELECT id,name,priority FROM routes WHERE role_id=? ORDER BY priority LIMIT 1", (role["id"],))
+            role["route"] = dict(route) if route else None
+            role["tools"] = app.state.tools.list_tools()
+        return roles
+
+    @app.get("/v1/workers")
+    async def list_workers() -> list[dict]:
+        active = database.fetch_one("SELECT COUNT(*) AS count FROM jobs WHERE kind='codex_worker' AND status IN ('queued','running')")
+        last = database.fetch_one("SELECT id,status,created_at,finished_at FROM jobs WHERE kind='codex_worker' ORDER BY created_at DESC LIMIT 1")
+        worker = app.state.codex_worker
+        return [{"name":"Codex CLI","type":"worker","kind":"codex_worker","available":bool(shutil.which(worker.executable) or Path(worker.executable).exists()),"authenticated":None,"active_jobs":int(active["count"]),"last_job":dict(last) if last else None,"workspace_root":str(worker.workspace_root)}]
 
     @app.get("/v1/jobs/{job_id}")
     async def get_job(job_id: str) -> dict:
