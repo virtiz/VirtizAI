@@ -261,3 +261,25 @@ async def test_secretary_plans_natural_cleanup_before_confirmation(tmp_path):
     gateway = DiscordGateway(Adapter(), db, FileSecretStore(tmp_path / "secrets.json"))
     assert await gateway.handle_message(message)
     assert "Before I delete anything" in channel.sent[-1]
+
+@pytest.mark.asyncio
+async def test_authoritative_thread_inspection_uses_gateway_state(tmp_path):
+    from types import SimpleNamespace
+    from virtizai_core.db import Database
+    db = Database(tmp_path / "state.db")
+    db.open()
+    db.execute("UPDATE discord_config SET enabled=1, allow_dms=0, require_mentions=0, allowed_servers_json=? WHERE id='discord-default'", (json.dumps(["guild"]),))
+    class Guild:
+        id = "guild"
+        active_threads = [SimpleNamespace(id=11, name="managed"), SimpleNamespace(id=12, name="other")]
+    class Channel:
+        id = "channel"
+        parent_id = None
+        def __init__(self): self.sent = []
+        async def send(self, value): self.sent.append(value)
+    channel = Channel()
+    message = SimpleNamespace(author=SimpleNamespace(bot=False, id="user"), guild=Guild(), channel=channel, content="how many threads are there in this server?", raw_mentions=[])
+    gateway = DiscordGateway(None, db, FileSecretStore(tmp_path / "secrets.json"))
+    assert await gateway.handle_message(message)
+    assert "Actual active Discord threads: 2" in channel.sent[-1]
+    assert "VirtizAI-mapped threads: 0" in channel.sent[-1]

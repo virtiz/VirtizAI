@@ -228,4 +228,9 @@ async def test_secretary_primary_failure_attempts_fallback_and_records_reason(tm
     assert metadata["fallback_used"] is True
     assert metadata["fallback_reason"]
     assert metadata["attempt_failures"][0]["model"] == "phi"
+    second = await core.handle_message("fallback-user", session_id, "research why this failed")
+    assert second.provider_name == "Fallback"
+    affinity = database.fetch_one("SELECT affinity_provider_name, affinity_model_name FROM sessions WHERE id=?", (session_id,))
+    assert affinity["affinity_provider_name"] == "Fallback"
+    assert affinity["affinity_model_name"] == "hermes"
     database.close()
