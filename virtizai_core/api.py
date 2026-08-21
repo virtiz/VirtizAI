@@ -123,6 +123,25 @@ class ProjectCreate(BaseModel):
     name: str
     description: str | None = None
     root_path: str | None = None
+    objective: str | None = None
+    status: str = "active"
+
+
+class ProjectUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    root_path: str | None = None
+    objective: str | None = None
+    status: str | None = None
+
+
+class ProjectEnvironmentLink(BaseModel):
+    environment_target_id: str
+    relationship: str = "relevant"
+
+
+class SessionProjectLink(BaseModel):
+    project_id: str | None = None
 
 
 class EnvironmentCreate(BaseModel):
@@ -666,12 +685,63 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.get("/v1/projects")
     async def list_projects() -> list[dict]:
-        return [dict(row) for row in database.fetch_all("SELECT * FROM projects ORDER BY name")]
+        return [dict(row) for row in database.fetch_all("SELECT p.*, (SELECT COUNT(*) FROM sessions s WHERE s.project_id=p.id) AS session_count FROM projects p ORDER BY p.name")]
 
     @app.post("/v1/projects")
     async def create_project(request: ProjectCreate) -> dict:
         project_id = app.state.projects.create(request.name, request.description, request.root_path)
+        database.execute("UPDATE projects SET objective=?, status=? WHERE id=?", (request.objective, request.status, project_id))
         return dict(database.fetch_one("SELECT * FROM projects WHERE id = ?", (project_id,)))
+
+    @app.get("/v1/projects/{project_id}")
+    async def get_project(project_id: str) -> dict:
+        project = database.fetch_one("SELECT * FROM projects WHERE id=?", (project_id,))
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        result = dict(project)
+        result["sessions"] = [dict(row) for row in database.fetch_all("SELECT id,user_id,title,status,updated_at FROM sessions WHERE project_id=? ORDER BY updated_at DESC", (project_id,))]
+        result["environments"] = [dict(row) for row in database.fetch_all("SELECT e.*, pe.relationship FROM environment_targets e JOIN project_environment_targets pe ON pe.environment_target_id=e.id WHERE pe.project_id=? ORDER BY e.name", (project_id,))]
+        result["jobs"] = [dict(row) for row in database.fetch_all("SELECT j.id,j.kind,j.status,j.session_id,j.created_at,j.finished_at FROM jobs j JOIN sessions s ON s.id=j.session_id WHERE s.project_id=? ORDER BY j.created_at DESC", (project_id,))]
+        return result
+
+    @app.patch("/v1/projects/{project_id}")
+    async def update_project(project_id: str, request: ProjectUpdate) -> dict:
+        if database.fetch_one("SELECT id FROM projects WHERE id=?", (project_id,)) is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        values = request.model_dump(exclude_unset=True)
+        if values:
+            fields = ", ".join(f"{key}=?" for key in values)
+            database.execute(f"UPDATE projects SET {fields}, updated_at=CURRENT_TIMESTAMP WHERE id=?", (*values.values(), project_id))
+        return dict(database.fetch_one("SELECT * FROM projects WHERE id=?", (project_id,)))
+
+    @app.delete("/v1/projects/{project_id}")
+    async def delete_project(project_id: str) -> dict:
+        if database.fetch_one("SELECT id FROM projects WHERE id=?", (project_id,)) is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        database.execute("UPDATE sessions SET project_id=NULL WHERE project_id=?", (project_id,))
+        database.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        return {"deleted": project_id}
+
+    @app.post("/v1/projects/{project_id}/environments")
+    async def link_project_environment(project_id: str, request: ProjectEnvironmentLink) -> dict:
+        if database.fetch_one("SELECT id FROM projects WHERE id=?", (project_id,)) is None or database.fetch_one("SELECT id FROM environment_targets WHERE id=?", (request.environment_target_id,)) is None:
+            raise HTTPException(status_code=404, detail="Project or environment not found")
+        database.execute("INSERT OR REPLACE INTO project_environment_targets(project_id, environment_target_id, relationship) VALUES (?,?,?)", (project_id, request.environment_target_id, request.relationship))
+        return {"project_id": project_id, "environment_target_id": request.environment_target_id, "relationship": request.relationship}
+
+    @app.delete("/v1/projects/{project_id}/environments/{environment_id}")
+    async def unlink_project_environment(project_id: str, environment_id: str) -> dict:
+        database.execute("DELETE FROM project_environment_targets WHERE project_id=? AND environment_target_id=?", (project_id, environment_id))
+        return {"unlinked": environment_id}
+
+    @app.patch("/v1/sessions/{session_id}/project")
+    async def link_session_project(session_id: str, request: SessionProjectLink) -> dict:
+        if database.fetch_one("SELECT id FROM sessions WHERE id=?", (session_id,)) is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if request.project_id is not None and database.fetch_one("SELECT id FROM projects WHERE id=?", (request.project_id,)) is None:
+            raise HTTPException(status_code=404, detail="Project not found")
+        database.execute("UPDATE sessions SET project_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (request.project_id, session_id))
+        return dict(database.fetch_one("SELECT * FROM sessions WHERE id=?", (session_id,)))
 
     @app.get("/v1/environments")
     async def list_environments() -> list[dict]:

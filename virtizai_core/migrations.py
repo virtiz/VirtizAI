@@ -668,6 +668,19 @@ def migration_15(connection: sqlite3.Connection) -> None:
             connection.execute(f"ALTER TABLE sessions ADD COLUMN {name} {kind}")
 
 
+def migration_16(connection: sqlite3.Connection) -> None:
+    """Add basic project status/objective and optional session association."""
+    project_columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
+    if "objective" not in project_columns:
+        connection.execute("ALTER TABLE projects ADD COLUMN objective TEXT")
+    if "status" not in project_columns:
+        connection.execute("ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+    session_columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
+    if "project_id" not in session_columns:
+        connection.execute("ALTER TABLE sessions ADD COLUMN project_id TEXT REFERENCES projects(id)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, updated_at)")
+
+
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -684,6 +697,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (13, migration_13),
     (14, migration_14),
     (15, migration_15),
+    (16, migration_16),
 )
 
 
