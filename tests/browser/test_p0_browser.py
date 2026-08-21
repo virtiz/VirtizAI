@@ -38,3 +38,17 @@ def test_provider_validation_and_responsive_layout(page):
         page.set_viewport_size({"width": width, "height": 844})
         page.reload(wait_until="domcontentloaded")
         assert page.evaluate("document.documentElement.scrollWidth") <= width + 2
+
+def test_navigation_and_wizard_controls_are_truthful(page):
+    page.goto(BASE + "/", wait_until="domcontentloaded")
+    page.get_by_role("button", name="Setup").click()
+    page.wait_for_timeout(200)
+    page.locator("button[data-action='wizard-next']").click()
+    page.wait_for_timeout(100)
+    assert page.locator(".choice-card").count() > 0
+    assert page.locator(".choice-card").evaluate_all("els => els.every(e => e.tagName !== 'BUTTON')")
+    assert "Choose your first interfaces" in page.locator("body").inner_text()
+    page.goto(BASE + "/", wait_until="domcontentloaded")
+    labels = page.locator("button[data-view]").evaluate_all("els => els.map(e => e.innerText)")
+    assert labels and all("â" not in label for label in labels)
+    assert any("Chat" in label for label in labels)
