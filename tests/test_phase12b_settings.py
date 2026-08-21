@@ -31,3 +31,16 @@ async def test_webui_preferences_persist_and_discord_config_redacts_secret(tmp_p
         config = (await client.put("/v1/discord/config", json={"enabled": False, "bot_secret_ref": "discord-test", "alert_channel_id": "alerts", "allowed_servers": ["guild"]})).json()
         assert config["bot_secret_configured"] is True
         assert "synthetic-token" not in json.dumps(config)
+
+
+@pytest.mark.asyncio
+async def test_readiness_and_discovery_are_structured(tmp_path: Path):
+    app = create_app(AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        readiness = (await client.get("/v1/readiness")).json()
+        assert readiness["application"] == "healthy"
+        assert readiness["setup_complete"] is False
+        discovery = (await client.get("/v1/discord/discovery")).json()
+        assert discovery["ok"] is False
+        assert discovery["code"] == "gateway_unavailable"
+        assert "token" not in json.dumps(discovery).lower()

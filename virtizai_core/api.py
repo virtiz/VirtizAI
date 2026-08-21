@@ -617,6 +617,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def discord_status() -> dict:
         return app.state.discord_gateway.status()
 
+    @app.get("/v1/discord/discovery")
+    async def discord_discovery() -> dict:
+        return await app.state.discord_gateway.discovery()
+
+    @app.get("/v1/discord/validate")
+    async def discord_validate() -> dict:
+        return await app.state.discord_gateway.validate_configuration()
+
     @app.put("/v1/discord/config")
     async def update_discord_config(request: DiscordConfigUpdate) -> dict:
         values = request.model_dump()
@@ -726,6 +734,24 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/v1/activity")
     async def activity() -> list[dict]:
         return [dict(row) for row in database.fetch_all("SELECT * FROM execution_audit ORDER BY created_at DESC LIMIT 100")]
+
+    @app.get("/v1/readiness")
+    async def readiness() -> dict:
+        provider_count = int(database.fetch_one("SELECT COUNT(*) AS count FROM providers")['count'])
+        model_count = int(database.fetch_one("SELECT COUNT(*) AS count FROM models")['count'])
+        route = database.fetch_one("SELECT r.id FROM routes r JOIN roles ro ON ro.id=r.role_id WHERE (lower(ro.name) LIKE '%secretary%' OR lower(r.name) LIKE '%secretary%') AND EXISTS (SELECT 1 FROM route_targets t WHERE t.route_id=r.id AND t.enabled=1) ORDER BY r.priority LIMIT 1")
+        discord = app.state.discord_gateway.status()
+        discord_config = database.fetch_one("SELECT enabled, bot_secret_ref, allowed_servers_json, allowed_channels_json FROM discord_config WHERE id='discord-default'")
+        secret_ready = bool(discord_config and discord_config['bot_secret_ref'] and app.state.secrets.configured(discord_config['bot_secret_ref']))
+        secretary_ready = bool(route and model_count)
+        return {
+            "application": "healthy",
+            "provider": {"configured": provider_count > 0, "count": provider_count},
+            "models": {"discovered": model_count > 0, "count": model_count},
+            "secretary": {"configured": bool(route), "ready": secretary_ready, "route_id": route['id'] if route else None},
+            "discord": {"enabled": bool(discord_config and discord_config['enabled']), "token_configured": secret_ready, "status": discord.get('status')},
+            "setup_complete": secretary_ready,
+        }
 
     @app.get("/v1/providers")
     async def list_providers() -> list[dict]:

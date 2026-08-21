@@ -266,6 +266,88 @@ class DiscordGateway:
     def status(self) -> dict[str, Any]:
         return self._status.as_dict()
 
+    def _discovery_error(self, code: str, message: str) -> dict[str, Any]:
+        return {"ok": False, "code": code, "message": message, "guilds": [], "limitations": [message]}
+
+    @staticmethod
+    def _channel_permissions(channel, member) -> dict[str, bool]:
+        if member is None or not hasattr(channel, "permissions_for"):
+            return {}
+        try:
+            permissions = channel.permissions_for(member)
+            return {
+                "view": bool(getattr(permissions, "view_channel", False)),
+                "read_history": bool(getattr(permissions, "read_message_history", False)),
+                "send": bool(getattr(permissions, "send_messages", False)),
+                "threads": bool(getattr(permissions, "create_public_threads", False) or getattr(permissions, "create_private_threads", False)),
+                "thread_messages": bool(getattr(permissions, "send_messages_in_threads", False)),
+            }
+        except Exception:
+            return {}
+
+    async def discovery(self) -> dict[str, Any]:
+        """Return authoritative, permission-aware Discord state without secrets."""
+        if self.client is None or self._status.status != "connected":
+            return self._discovery_error("gateway_unavailable", f"Discord gateway is {self._status.status}.")
+        row = self.config()
+        configured_servers = self._list(row, "allowed_servers_json") if row else set()
+        configured_channels = self._list(row, "allowed_channels_json") if row else set()
+        guilds = []
+        for guild in list(getattr(self.client, "guilds", []) or []):
+            member = getattr(guild, "me", None)
+            channels = []
+            for channel in list(getattr(guild, "text_channels", []) or []):
+                permissions = self._channel_permissions(channel, member)
+                if permissions and not permissions.get("view", False):
+                    continue
+                channels.append({
+                    "id": str(channel.id),
+                    "name": getattr(channel, "name", str(channel.id)),
+                    "kind": "text",
+                    "permissions": permissions,
+                    "conversation_candidate": bool(not permissions or (permissions.get("read_history") and permissions.get("send") and permissions.get("thread_messages"))),
+                    "alert_candidate": bool(not permissions or (permissions.get("view") and permissions.get("send"))),
+                    "configured": str(channel.id) in configured_channels,
+                })
+            guilds.append({
+                "id": str(guild.id),
+                "name": getattr(guild, "name", str(guild.id)),
+                "configured": str(guild.id) in configured_servers,
+                "channels": channels,
+            })
+        return {"ok": True, "gateway": self.status(), "guilds": guilds, "configured_scope": {"guilds": sorted(configured_servers), "channels": sorted(configured_channels)}, "limitations": ["Member/user discovery is not requested; configure authorized users under Advanced."]}
+
+    async def validate_configuration(self) -> dict[str, Any]:
+        if self.client is None or self._status.status != "connected":
+            return self._discovery_error("gateway_unavailable", f"Discord gateway is {self._status.status}.")
+        row = self.config()
+        servers = self._list(row, "allowed_servers_json") if row else set()
+        channels = self._list(row, "allowed_channels_json") if row else set()
+        alerts = str(row["alert_channel_id"] or "") if row and "alert_channel_id" in row.keys() else ""
+        found = {str(guild.id): guild for guild in getattr(self.client, "guilds", []) or []}
+        guild_results = []
+        for guild_id in sorted(servers):
+            guild = found.get(guild_id)
+            if guild is None:
+                guild_results.append({"id": guild_id, "ok": False, "error": "guild inaccessible"})
+                continue
+            available = {str(ch.id): ch for ch in getattr(guild, "text_channels", []) or []}
+            checks = []
+            for channel_id in sorted(channels):
+                channel = available.get(channel_id)
+                if channel is None:
+                    checks.append({"id": channel_id, "ok": False, "error": "channel inaccessible"})
+                else:
+                    permissions = self._channel_permissions(channel, getattr(guild, "me", None))
+                    checks.append({"id": channel_id, "name": getattr(channel, "name", channel_id), "ok": not permissions or bool(permissions.get("view") and permissions.get("send")), "permissions": permissions})
+            alert_check = None
+            if alerts:
+                channel = available.get(alerts)
+                alert_check = {"id": alerts, "ok": bool(channel), "name": getattr(channel, "name", alerts) if channel else None, "error": None if channel else "alert channel inaccessible"}
+            guild_results.append({"id": guild_id, "name": getattr(guild, "name", guild_id), "ok": True, "channels": checks, "alert_channel": alert_check})
+        valid = all(item.get("ok") and all(c.get("ok") for c in item.get("channels", [])) and (not item.get("alert_channel") or item["alert_channel"].get("ok")) for item in guild_results) if guild_results else not servers
+        return {"ok": valid, "gateway": self.status(), "guilds": guild_results, "limitations": ["No test message was sent."]}
+
     async def _set_status(self, status: str, error: str | None = None) -> None:
         previous = self._status.status
         self._status = GatewayStatus(status, error, self._status.connected_at, self._status.reconnects)

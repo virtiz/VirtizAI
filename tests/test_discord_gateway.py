@@ -283,3 +283,33 @@ async def test_authoritative_thread_inspection_uses_gateway_state(tmp_path):
     assert await gateway.handle_message(message)
     assert "Actual active Discord threads: 2" in channel.sent[-1]
     assert "VirtizAI-mapped threads: 0" in channel.sent[-1]
+
+
+@pytest.mark.asyncio
+async def test_authoritative_discord_discovery_and_validation(tmp_path):
+    from types import SimpleNamespace
+    from virtizai_core.db import Database
+    db=Database(tmp_path / "state.db"); db.open()
+    db.execute("UPDATE discord_config SET enabled=1, allowed_servers_json=?, allowed_channels_json=?, alert_channel_id=? WHERE id='discord-default'", (json.dumps(["guild-1"]), json.dumps(["chan-1"]), "chan-1"))
+    class Perms:
+        view_channel=True; read_message_history=True; send_messages=True; create_public_threads=True; create_private_threads=False; send_messages_in_threads=True
+    class Channel:
+        def __init__(self, ident, name): self.id=ident; self.name=name
+        def permissions_for(self, member): return Perms()
+    channel=Channel("chan-1", "general")
+    guild=SimpleNamespace(id="guild-1", name="Test Guild", me=object(), text_channels=[channel])
+    gateway=DiscordGateway(None, db, FileSecretStore(tmp_path / "secrets.json"))
+    gateway.client=SimpleNamespace(guilds=[guild]); gateway._status=type(gateway._status)("connected")
+    discovered=await gateway.discovery()
+    assert discovered["ok"] and discovered["guilds"][0]["name"] == "Test Guild"
+    assert discovered["guilds"][0]["channels"][0]["conversation_candidate"]
+    validated=await gateway.validate_configuration()
+    assert validated["ok"] and validated["guilds"][0]["channels"][0]["name"] == "general"
+
+@pytest.mark.asyncio
+async def test_discord_discovery_reports_gateway_limitation(tmp_path):
+    from virtizai_core.db import Database
+    db=Database(tmp_path / "state.db"); db.open()
+    gateway=DiscordGateway(None, db, FileSecretStore(tmp_path / "secrets.json"))
+    result=await gateway.discovery()
+    assert not result["ok"] and result["code"] == "gateway_unavailable"
