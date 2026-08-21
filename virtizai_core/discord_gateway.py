@@ -51,6 +51,10 @@ class DiscordGateway:
         self._stop = asyncio.Event()
         self._status = GatewayStatus("disabled")
         self._send_lock = asyncio.Lock()
+        # Destructive Discord actions are deliberately confirmation-gated.  A
+        # pending scope is bound to one guild/user and is never inferred from
+        # model output or shared across users.
+        self._thread_cleanup_pending: dict[tuple[str, str], dict[str, Any]] = {}
         self.ignored_bot_ids = {item.strip() for item in os.environ.get("VIRTIZAI_DISCORD_IGNORED_BOT_IDS", "").split(",") if item.strip()}
         if self.jobs is not None:
             self.jobs.register_listener(self._on_job_complete)
@@ -99,6 +103,91 @@ class DiscordGateway:
         if not content:
             return []
         return [content[i:i + limit] for i in range(0, len(content), limit)]
+
+    @staticmethod
+    def _thread_cleanup_requested(text: str) -> bool:
+        tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+        return bool(tokens & {"delete", "remove", "prune", "clean"}) and bool(tokens & {"thread", "threads"}) and bool(tokens & {"server", "guild", "discord"})
+
+    @staticmethod
+    def _cleanup_answers(text: str) -> dict[str, str]:
+        lowered = text.lower()
+        answers: dict[str, str] = {}
+        if any(term in lowered for term in ("one-time", "one time", "once", "now only")):
+            answers["mode"] = "one-time cleanup"
+        elif any(term in lowered for term in ("reusable", "command", "future", "keep enabled")):
+            answers["mode"] = "reusable command"
+        if any(term in lowered for term in ("archived", "all threads", "every thread", "include all")):
+            answers["archived"] = "including archived threads"
+        elif any(term in lowered for term in ("active only", "not archived", "exclude archived")):
+            answers["archived"] = "active threads only"
+        if any(term in lowered for term in ("none", "no exclusions", "nothing to preserve", "preserve nothing")):
+            answers["preserve"] = "none"
+        return answers
+
+    async def _send_direct(self, channel, content: str) -> None:
+        async with self._send_lock:
+            for chunk in self.response_chunks(content):
+                await channel.send(chunk)
+
+    async def _thread_cleanup_flow(self, message, guild_id: str, user_id: str, text: str) -> bool:
+        key = (guild_id, user_id)
+        pending = self._thread_cleanup_pending.get(key)
+        if pending is None and not self._thread_cleanup_requested(text):
+            return False
+        if pending is None:
+            self._thread_cleanup_pending[key] = {"stage": "questions", "channel_id": str(message.channel.id)}
+            await self._send_direct(message.channel, "Before I delete anything, please clarify:\n1. Is this a one-time cleanup now, or should this become a reusable command?\n2. Should I include all threads, including archived threads?\n3. Are there any threads I should preserve?\n\nI will show the exact scope and ask for explicit confirmation before deleting anything.")
+            return True
+        answers = dict(pending.get("answers") or {})
+        answers.update(self._cleanup_answers(text))
+        pending["answers"] = answers
+        if pending["stage"] == "questions":
+            missing = [label for label, field in (("one-time or reusable", "mode"), ("include archived or active only", "archived"), ("threads to preserve (or none)", "preserve")) if field not in answers]
+            if missing:
+                await self._send_direct(message.channel, "I still need: " + "; ".join(missing) + ".")
+                return True
+            pending["stage"] = "confirmation"
+            await self._send_direct(message.channel, "Proposed Discord cleanup scope:\n- Guild: this configured server\n- Threads: " + answers["archived"] + "\n- Preserve: " + answers["preserve"] + "\n- Mode: " + answers["mode"] + "\n\nReply `CONFIRM DELETE` to proceed, or `CANCEL` to abandon. No threads have been deleted.")
+            return True
+        if pending["stage"] == "confirmation":
+            if re.search(r"\bcancel\b", text, re.IGNORECASE):
+                self._thread_cleanup_pending.pop(key, None)
+                await self._send_direct(message.channel, "Cancelled. No Discord threads were deleted.")
+                return True
+            if not re.search(r"\bconfirm\b.*\bdelete\b|\bdelete\b.*\bconfirm\b", text, re.IGNORECASE):
+                await self._send_direct(message.channel, "No deletion occurred. Reply `CONFIRM DELETE` to proceed, or `CANCEL`.")
+                return True
+            self._thread_cleanup_pending.pop(key, None)
+            guild = getattr(message, "guild", None)
+            threads = []
+            try:
+                active = await guild.fetch_active_threads()
+                threads.extend(list(getattr(active, "threads", active) or []))
+            except Exception as exc:
+                await self._send_direct(message.channel, f"I could not enumerate active Discord threads ({type(exc).__name__}); nothing was deleted.")
+                return True
+            if answers["archived"] == "including archived threads":
+                for channel in getattr(guild, "text_channels", []) or []:
+                    try:
+                        async for thread in channel.archived_threads(limit=None):
+                            threads.append(thread)
+                    except Exception:
+                        continue
+            preserve = {item.strip() for item in answers["preserve"].split(",") if item.strip() and item.strip() != "none"}
+            deleted = 0
+            failed = 0
+            for thread in {str(getattr(item, "id", "")): item for item in threads}.values():
+                if not getattr(thread, "id", None) or str(thread.id) in preserve or str(getattr(thread, "name", "")) in preserve:
+                    continue
+                try:
+                    await thread.delete(reason="VirtizAI confirmed Discord thread cleanup")
+                    deleted += 1
+                except Exception:
+                    failed += 1
+            await self._send_direct(message.channel, f"Discord thread cleanup completed: deleted {deleted}, failed {failed}, preserved {len(preserve)}. This is the complete result; no deletion is claimed for failures.")
+            return True
+        return True
 
     def status(self) -> dict[str, Any]:
         return self._status.as_dict()
@@ -245,6 +334,8 @@ class DiscordGateway:
         )
         if text is None:
             return False
+        if guild_id is not None and await self._thread_cleanup_flow(message, guild_id, user_id, text):
+            return True
         is_thread = getattr(channel, "parent_id", None) is not None or mapping is not None
         if not is_thread:
             thread = await self._new_thread(message)

@@ -171,3 +171,63 @@ async def test_gateway_thread_reply_requires_mapping_and_reuses_session(tmp_path
     gateway = DiscordGateway(Adapter(), db, FileSecretStore(tmp_path / "secrets.json"))
     assert await gateway.handle_message(message)
     assert calls == [(None, "s1")]
+
+
+@pytest.mark.asyncio
+async def test_thread_cleanup_requires_scope_answers_and_explicit_confirmation(tmp_path):
+    from types import SimpleNamespace
+    from virtizai_core.db import Database
+
+    db = Database(tmp_path / "state.db")
+    db.open()
+    db.execute("UPDATE discord_config SET enabled=1, allow_dms=0, require_mentions=0, allowed_servers_json=?, allowed_channels_json=? WHERE id='discord-default'", (json.dumps(["guild"]), json.dumps(["channel"])))
+
+    class Thread:
+        id = 99
+        name = "test-thread"
+        deleted = False
+
+        async def delete(self, reason=None):
+            self.deleted = True
+
+    thread = Thread()
+
+    class Guild:
+        id = "guild"
+        text_channels = []
+
+        async def fetch_active_threads(self):
+            return SimpleNamespace(threads=[thread])
+
+    class Channel:
+        id = "channel"
+        parent_id = None
+
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, value):
+            self.sent.append(value)
+
+    class Adapter:
+        async def handle_message(self, *args, **kwargs):
+            raise AssertionError("cleanup flow must not invoke the model")
+
+    channel = Channel()
+    gateway = DiscordGateway(Adapter(), db, FileSecretStore(tmp_path / "secrets.json"))
+
+    def message(content):
+        return SimpleNamespace(
+            author=SimpleNamespace(bot=False, id="user", display_name="Owner"),
+            guild=Guild(), channel=channel, content=content, raw_mentions=[], id=1,
+        )
+
+    assert await gateway.handle_message(message("delete all threads in the server now"))
+    assert "Before I delete anything" in channel.sent[-1]
+    assert not thread.deleted
+    assert await gateway.handle_message(message("one-time; include archived; preserve none"))
+    assert "Proposed Discord cleanup scope" in channel.sent[-1]
+    assert not thread.deleted
+    assert await gateway.handle_message(message("CONFIRM DELETE"))
+    assert thread.deleted
+    assert "deleted 1" in channel.sent[-1]
