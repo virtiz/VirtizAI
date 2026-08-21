@@ -120,7 +120,7 @@ class DiscordGateway:
             answers["mode"] = "reusable command"
         if compact in {"yes", "y"} or any(term in lowered for term in ("archived", "all threads", "every thread", "include all")):
             answers["archived"] = "including archived threads"
-        elif compact in {"no", "n"} or any(term in lowered for term in ("active only", "not archived", "exclude archived")):
+        elif compact in {"no", "n", "active", "active only"} or any(term in lowered for term in ("active only", "not archived", "exclude archived")):
             answers["archived"] = "active threads only"
         if any(term in lowered for term in ("none", "no exclusions", "nothing to preserve", "preserve nothing")):
             answers["preserve"] = "none"
