@@ -112,17 +112,22 @@ class DiscordGateway:
     @staticmethod
     def _cleanup_answers(text: str) -> dict[str, str]:
         lowered = text.lower()
+        compact = lowered.strip()
         answers: dict[str, str] = {}
-        if any(term in lowered for term in ("one-time", "one time", "once", "now only")):
+        if compact in {"1", "one", "one-time", "one time"} or any(term in lowered for term in ("one-time", "one time", "once", "now only")):
             answers["mode"] = "one-time cleanup"
-        elif any(term in lowered for term in ("reusable", "command", "future", "keep enabled")):
+        elif compact in {"2", "reusable"} or any(term in lowered for term in ("reusable", "command", "future", "keep enabled")):
             answers["mode"] = "reusable command"
-        if any(term in lowered for term in ("archived", "all threads", "every thread", "include all")):
+        if compact in {"yes", "y"} or any(term in lowered for term in ("archived", "all threads", "every thread", "include all")):
             answers["archived"] = "including archived threads"
-        elif any(term in lowered for term in ("active only", "not archived", "exclude archived")):
+        elif compact in {"no", "n"} or any(term in lowered for term in ("active only", "not archived", "exclude archived")):
             answers["archived"] = "active threads only"
         if any(term in lowered for term in ("none", "no exclusions", "nothing to preserve", "preserve nothing")):
             answers["preserve"] = "none"
+        elif "preserve" in lowered:
+            value = lowered.split("preserve", 1)[1].strip(" :,-")
+            if value:
+                answers["preserve"] = value
         return answers
 
     async def _send_direct(self, channel, content: str) -> None:
@@ -143,9 +148,13 @@ class DiscordGateway:
         answers.update(self._cleanup_answers(text))
         pending["answers"] = answers
         if pending["stage"] == "questions":
-            missing = [label for label, field in (("one-time or reusable", "mode"), ("include archived or active only", "archived"), ("threads to preserve (or none)", "preserve")) if field not in answers]
+            missing = [(label, field, question) for label, field, question in (
+                ("one-time or reusable", "mode", "Is this a one-time cleanup (`1`) or reusable command (`2`)?"),
+                ("include archived or active only", "archived", "Should I include archived threads, or delete active threads only?"),
+                ("threads to preserve (or none)", "preserve", "Are there any threads to preserve? Reply with their IDs/names, or `none`."),
+            ) if field not in answers]
             if missing:
-                await self._send_direct(message.channel, "I still need: " + "; ".join(missing) + ".")
+                await self._send_direct(message.channel, missing[0][2])
                 return True
             pending["stage"] = "confirmation"
             await self._send_direct(message.channel, "Proposed Discord cleanup scope:\n- Guild: this configured server\n- Threads: " + answers["archived"] + "\n- Preserve: " + answers["preserve"] + "\n- Mode: " + answers["mode"] + "\n\nReply `CONFIRM DELETE` to proceed, or `CANCEL` to abandon. No threads have been deleted.")
