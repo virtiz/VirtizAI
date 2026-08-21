@@ -163,8 +163,19 @@ async function refreshLiveData(view){
       const panel=viewContent.querySelector('.card'); if(panel)panel.innerHTML=rows;
     }
     if(view==='models' && models.length){
-      const html=models.map(model=>`<div class="card stat-card"><div class="service-name"><span class="route-icon coral">M</span><div>${model.name}<small>${model.provider_name}  /  ${model.locality||'capability metadata pending'}</small></div><span style="margin-left:auto">${statusBadge(model.status)}</span></div><div class="subtext" style="margin-top:16px">${model.context_window?`Context ${model.context_window}`:'Context unknown'}  /  discovered live</div></div>`).join('');
-      const grid=viewContent.querySelector('.grid'); if(grid)grid.innerHTML=html;
+      const html=models.map(model=>`<div class="card stat-card"><div class="service-name"><span class="route-icon coral">M</span><div>${model.name}<small>${model.provider_name}  /  ${model.locality||'capability metadata pending'}</small></div><span style="margin-left:auto" data-model-residency="${model.id}">${statusBadge('unknown')}</span></div><div class="subtext" style="margin-top:16px">${model.context_window?`Context ${model.context_window}`:'Context unknown'}  /  discovered live</div></div>`).join('');
+      const grid=viewContent.querySelector('.grid');
+      if(grid){
+        grid.innerHTML=html;
+        await Promise.all(models.map(async model=>{
+          const badge=grid.querySelector(`[data-model-residency="${model.id}"]`);
+          if(!badge)return;
+          try{
+            const residency=await fetch(`/v1/models/${model.id}/residency`).then(response=>response.json());
+            badge.innerHTML=statusBadge(residency.residency||(residency.resident?'warm':'cold'));
+          }catch(error){badge.innerHTML=statusBadge('unknown')}
+        }));
+      }
     }
     if(view==='routing'){
       const panel=viewContent.querySelector('#route-panel');
