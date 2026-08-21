@@ -22,9 +22,11 @@ def test_live_registry_and_navigation(page):
     page.locator("button").filter(has_text="Models").click()
     page.wait_for_timeout(250)
     assert "phi4-mini:latest" in page.locator("body").inner_text()
+    assert "Warm" in page.locator("body").inner_text()
     page.locator("button").filter(has_text="Routing").click()
     page.wait_for_timeout(250)
     assert "Secretary" in page.locator("body").inner_text()
+    assert "Provider:model targets" in page.locator("body").inner_text()
 
 def test_provider_validation_and_responsive_layout(page):
     page.goto(BASE + "/", wait_until="domcontentloaded")
