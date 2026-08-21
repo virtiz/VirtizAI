@@ -50,6 +50,7 @@ class DiscordGateway:
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._status = GatewayStatus("disabled")
+        self._intentional_shutdown = False
         self._send_lock = asyncio.Lock()
         # Destructive Discord actions are deliberately confirmation-gated.  A
         # pending scope is bound to one guild/user and is never inferred from
@@ -140,6 +141,60 @@ class DiscordGateway:
             for chunk in self.response_chunks(content):
                 await channel.send(chunk)
 
+    @staticmethod
+    def _inspection_kind(text: str) -> str | None:
+        tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+        if {"how", "many"} <= tokens and tokens & {"thread", "threads"} and tokens & {"server", "guild", "discord"}:
+            return "actual_thread_count"
+        if (tokens & {"list", "show", "which"}) and tokens & {"thread", "threads"}:
+            return "thread_list"
+        if tokens & {"mapped", "mapping"} and tokens & {"thread", "threads", "sessions"}:
+            return "mapped_thread_count"
+        if tokens & {"gateway", "connection", "connected"} and tokens & {"status", "healthy", "online", "state"}:
+            return "gateway_status"
+        if tokens & {"channel", "channels"} and tokens & {"monitoring", "configured", "watching"}:
+            return "scope"
+        return None
+
+    async def _discord_threads(self, guild) -> tuple[list[Any], str | None]:
+        try:
+            fetcher = getattr(guild, "fetch_active_threads", None)
+            if fetcher is not None:
+                result = await fetcher()
+                if hasattr(result, "threads"):
+                    return list(result.threads or []), None
+                if isinstance(result, tuple):
+                    return list(result[0] or []), None
+                return list(result or []), None
+            # discord.py 2.x exposes the gateway-synchronized cache as
+            # Guild.active_threads; Guild.fetch_active_threads is not a method.
+            return list(getattr(guild, "active_threads", []) or []), None
+        except Exception as exc:
+            _LOG.warning("Discord active-thread inspection failed: %s", type(exc).__name__, exc_info=True)
+            return [], f"{type(exc).__name__}: {str(exc)[:180]}"
+
+    async def _inspection_response(self, kind: str, guild, guild_id: str | None) -> str:
+        if kind == "gateway_status":
+            return f"Discord gateway status: {self._status.status}."
+        row = self.config()
+        if kind == "scope":
+            servers = sorted(self._list(row, "allowed_servers_json")) if row else []
+            channels = sorted(self._list(row, "allowed_channels_json")) if row else []
+            return f"Configured Discord scope: guilds={len(servers) or 'all allowed'}; channels={len(channels) or 'all allowed'}."
+        mapped = self.database.fetch_one(
+            "SELECT COUNT(*) AS count FROM discord_thread_sessions WHERE guild_id=?",
+            (guild_id,),
+        ) if guild_id else {"count": 0}
+        if kind == "mapped_thread_count":
+            return f"VirtizAI-mapped Discord threads in this guild: {int(mapped['count'])}."
+        threads, error = await self._discord_threads(guild)
+        if error:
+            return f"Actual Discord thread inventory is unavailable: {error}. VirtizAI-mapped threads: {int(mapped['count'])}."
+        if kind == "thread_list":
+            names = [f"{getattr(item, 'name', 'unnamed')} ({getattr(item, 'id', 'unknown')})" for item in threads[:25]]
+            return "Actual active Discord threads (authoritative gateway data): " + (", ".join(names) if names else "none") + f". VirtizAI-mapped threads: {int(mapped['count'])}."
+        return f"Actual active Discord threads: {len(threads)} (authoritative gateway data). VirtizAI-mapped threads: {int(mapped['count'])}. Archived-thread inventory is not included unless Discord exposes it to this bot."
+
     async def _thread_cleanup_flow(self, message, guild_id: str, user_id: str, text: str, recognized: bool = False) -> bool:
         key = (guild_id, user_id)
         pending = self._thread_cleanup_pending.get(key)
@@ -176,9 +231,14 @@ class DiscordGateway:
             guild = getattr(message, "guild", None)
             threads = []
             try:
-                active = await guild.fetch_active_threads()
-                threads.extend(list(getattr(active, "threads", active) or []))
+                fetcher = getattr(guild, "fetch_active_threads", None)
+                if fetcher is not None:
+                    active = await fetcher()
+                    threads.extend(list(getattr(active, "threads", active) or []))
+                else:
+                    threads.extend(list(getattr(guild, "active_threads", []) or []))
             except Exception as exc:
+                _LOG.warning("Discord cleanup thread enumeration failed: %s", type(exc).__name__, exc_info=True)
                 await self._send_direct(message.channel, f"I could not enumerate active Discord threads ({type(exc).__name__}); nothing was deleted.")
                 return True
             if answers["archived"] == "including archived threads":
@@ -209,7 +269,9 @@ class DiscordGateway:
     async def _set_status(self, status: str, error: str | None = None) -> None:
         previous = self._status.status
         self._status = GatewayStatus(status, error, self._status.connected_at, self._status.reconnects)
-        if self.events is not None and status != previous:
+        if self.events is not None and status != previous and not (
+            self._intentional_shutdown and status in {"disconnected", "disabled"}
+        ):
             await self.events.transition("gateway", "discord", "Discord gateway", status, error, "error" if status == "error" else "info", initial=previous == "disabled")
 
     async def _run(self, token: str) -> None:
@@ -229,6 +291,7 @@ class DiscordGateway:
         async def on_ready():
             await self._set_status("connected")
             self._status = GatewayStatus("connected", None, datetime.now(timezone.utc).isoformat(), self._status.reconnects)
+            await self._retry_pending_alerts()
 
         @self.client.event
         async def on_disconnect():
@@ -256,6 +319,24 @@ class DiscordGateway:
             finally:
                 if self.client and not self.client.is_closed():
                     await self.client.close()
+
+    async def _retry_pending_alerts(self) -> None:
+        row = self.config()
+        channel_id = row["alert_channel_id"] if row and "alert_channel_id" in row.keys() else None
+        if not channel_id or not self.client:
+            return
+        channel = self.client.get_channel(int(channel_id))
+        if channel is None:
+            return
+        pending = self.database.fetch_all(
+            "SELECT * FROM operational_events WHERE notification_status IN ('pending','failed') ORDER BY created_at LIMIT 20"
+        )
+        for event in pending:
+            try:
+                await channel.send(self._alert_text(dict(event)))
+                self.database.execute("UPDATE operational_events SET notification_status='delivered' WHERE id=?", (event["id"],))
+            except Exception:
+                break
 
     @staticmethod
     def _alert_text(event: dict) -> str:
@@ -348,6 +429,10 @@ class DiscordGateway:
         )
         if text is None:
             return False
+        inspection = self._inspection_kind(text)
+        if inspection and guild is not None:
+            await self._send_direct(channel, await self._inspection_response(inspection, guild, guild_id))
+            return True
         if guild_id is not None and ((guild_id, user_id) in self._thread_cleanup_pending or self._thread_action_candidate(text)):
             if (guild_id, user_id) in self._thread_cleanup_pending:
                 await self._thread_cleanup_flow(message, guild_id, user_id, text)
@@ -409,7 +494,9 @@ class DiscordGateway:
         return True
 
     async def start(self) -> None:
+        self._intentional_shutdown = True
         await self.stop()
+        self._intentional_shutdown = False
         row = self.config()
         if not row or not bool(row["enabled"]):
             await self._set_status("disabled")
@@ -426,6 +513,7 @@ class DiscordGateway:
         await self.start()
 
     async def stop(self) -> None:
+        self._intentional_shutdown = True
         self._stop.set()
         if self.client and not self.client.is_closed():
             await self.client.close()

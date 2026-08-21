@@ -259,6 +259,31 @@ class SessionService:
         )
         return session_id
 
+    def get_affinity(self, session_id: str):
+        return self.database.fetch_one(
+            "SELECT affinity_provider_id, affinity_model_id, affinity_provider_name, affinity_model_name, affinity_reason, affinity_updated_at FROM sessions WHERE id=?",
+            (session_id,),
+        )
+
+    def set_affinity(self, session_id: str, route, reason: str = "first_successful_inference") -> None:
+        self.database.execute(
+            """UPDATE sessions
+               SET affinity_provider_id=?, affinity_model_id=?,
+                   affinity_provider_name=?, affinity_model_name=?,
+                   affinity_reason=?, affinity_updated_at=CURRENT_TIMESTAMP,
+                   updated_at=CURRENT_TIMESTAMP
+               WHERE id=?""",
+            (route.provider_id, route.model_id, route.provider_name, route.model_name, reason, session_id),
+        )
+
+    def clear_affinity(self, session_id: str, reason: str) -> None:
+        self.database.execute(
+            """UPDATE sessions SET affinity_provider_id=NULL, affinity_model_id=NULL,
+               affinity_provider_name=NULL, affinity_model_name=NULL,
+               affinity_reason=?, affinity_updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+            (reason, session_id),
+        )
+
     def add_message(
         self,
         session_id: str,
@@ -428,7 +453,7 @@ class CoreService:
         self.sessions.ensure_user(user_id, display_name)
         with self.telemetry.stage(request_id, "session_lookup"):
             session = self.database.fetch_one(
-                "SELECT id FROM sessions WHERE id = ? AND user_id = ?",
+                "SELECT * FROM sessions WHERE id = ? AND user_id = ?",
                 (session_id, user_id),
             )
             if session is None:
@@ -464,6 +489,7 @@ class CoreService:
             self.sessions.add_message(session_id, "user", content)
         route = None
         inference = None
+        affinity = self.sessions.get_affinity(session_id)
         job_created = False
         job_id = None
         fallback_reason = None
@@ -484,9 +510,21 @@ class CoreService:
                 "content": "Answer as a fast secretary. Be concise: use at most three short bullet points and no long preamble.",
             })
         if classification.kind == "hard":
+            worker_context = {
+                "session_id": session_id,
+                "interface_type": interface_type,
+                "recent_messages": recent_context[-6:],
+                "known_state": {
+                    "classification": classification.kind,
+                    "session_affinity": (
+                        f"{affinity['affinity_provider_name']}:{affinity['affinity_model_name']}"
+                        if affinity and affinity["affinity_provider_name"] else None
+                    ),
+                },
+            }
             job_id = await self.jobs.submit(
                 "codex_worker",
-                {"prompt": content, "notification": notification or {}, "interface_type": interface_type},
+                {"prompt": content, "context": worker_context, "notification": notification or {}, "interface_type": interface_type},
                 user_id=user_id,
                 session_id=session_id,
             )
@@ -496,7 +534,18 @@ class CoreService:
             role_name = "secretary" if classification.kind == "simple" else "general-reasoning"
             route_stage = "secretary_route" if classification.kind == "simple" else "medium_route"
             with self.telemetry.stage(request_id, route_stage):
-                candidates = self.routes.resolve_role(role_name) if classification.kind == "medium" else await self._secretary_candidates()
+                if affinity and affinity["affinity_provider_id"] and classification.kind != "hard":
+                    # A session's conversational model is stable; task class may
+                    # select tools/workers, but must not silently switch the voice.
+                    candidates = [
+                        item for item in await self._secretary_candidates()
+                        if item.provider_id == affinity["affinity_provider_id"]
+                        and item.model_id == affinity["affinity_model_id"]
+                    ]
+                    if not candidates:
+                        candidates = await self._secretary_candidates()
+                else:
+                    candidates = self.routes.resolve_role(role_name) if classification.kind == "medium" else await self._secretary_candidates()
             total_budget = float(os.environ.get(
                 "VIRTIZAI_SECRETARY_TIMEOUT_SECONDS" if classification.kind == "simple" else "VIRTIZAI_MEDIUM_TIMEOUT_SECONDS",
                 "15" if classification.kind == "simple" else "120",
@@ -529,6 +578,10 @@ class CoreService:
                             timeout=candidate_timeout,
                         )
                     route = candidate
+                    if not affinity or not affinity["affinity_provider_id"]:
+                        self.sessions.set_affinity(session_id, candidate, "first_successful_inference")
+                    elif candidate.provider_id != affinity["affinity_provider_id"] or candidate.model_id != affinity["affinity_model_id"]:
+                        self.sessions.set_affinity(session_id, candidate, "affinity_model_unavailable_fallback")
                     if self.events is not None:
                         await self.events.transition("model", candidate.model_id, f"{candidate.provider_name}:{candidate.model_name}", "available", None, "info")
                     self.database.execute(
@@ -574,6 +627,7 @@ class CoreService:
                 "locality": "local" if route and route.provider_name and "NeuralWatt" not in route.provider_name else ("cloud" if route else None),
                 "fallback_used": bool(route and getattr(route, "ordinal", 0) > 0),
                 "fallback_reason": fallback_reason,
+                "session_affinity": bool(affinity and affinity["affinity_provider_id"]),
                 "attempt_failures": attempt_failures,
                 "latency_ms": latency_ms,
                 "ttft_ms": inference.ttft_ms if inference else None,

@@ -652,6 +652,22 @@ def migration_14(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE messages ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
 
 
+def migration_15(connection: sqlite3.Connection) -> None:
+    """Persist per-session conversational model affinity."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(sessions)")}
+    additions = {
+        "affinity_provider_id": "TEXT",
+        "affinity_model_id": "TEXT",
+        "affinity_provider_name": "TEXT",
+        "affinity_model_name": "TEXT",
+        "affinity_reason": "TEXT",
+        "affinity_updated_at": "TEXT",
+    }
+    for name, kind in additions.items():
+        if name not in columns:
+            connection.execute(f"ALTER TABLE sessions ADD COLUMN {name} {kind}")
+
+
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -667,6 +683,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (12, migration_12),
     (13, migration_13),
     (14, migration_14),
+    (15, migration_15),
 )
 
 
