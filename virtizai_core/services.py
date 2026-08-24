@@ -339,7 +339,7 @@ class RouteResolver:
         self.database = database
 
     def resolve_secretary(self, strategy: str = "lowest_latency") -> list:
-        role = self.database.fetch_one("SELECT id FROM roles WHERE name = 'secretary'")
+        role = self.database.fetch_one("SELECT id FROM roles WHERE id = 'role-secretary'")
         if role is None:
             return []
         return RoutingEngine(self.database).eligible_routes(role["id"], strategy)

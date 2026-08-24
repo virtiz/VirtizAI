@@ -92,6 +92,7 @@ class RouteCreate(BaseModel):
 
 
 class RouteUpdate(BaseModel):
+    role_id: str | None = None
     strategy: str = "priority"
     priority: int = 100
     targets: list[dict] = Field(default_factory=list)
@@ -819,7 +820,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     async def readiness() -> dict:
         provider_count = int(database.fetch_one("SELECT COUNT(*) AS count FROM providers")['count'])
         model_count = int(database.fetch_one("SELECT COUNT(*) AS count FROM models")['count'])
-        route = database.fetch_one("SELECT r.id FROM routes r JOIN roles ro ON ro.id=r.role_id WHERE (lower(ro.name) LIKE '%secretary%' OR lower(r.name) LIKE '%secretary%') AND EXISTS (SELECT 1 FROM route_targets t WHERE t.route_id=r.id AND t.enabled=1) ORDER BY r.priority LIMIT 1")
+        route = database.fetch_one("SELECT r.id FROM routes r WHERE r.role_id='role-secretary' AND r.enabled=1 AND EXISTS (SELECT 1 FROM route_targets t WHERE t.route_id=r.id AND t.enabled=1) ORDER BY r.priority LIMIT 1")
         discord = app.state.discord_gateway.status()
         discord_config = database.fetch_one("SELECT enabled, bot_secret_ref, allowed_servers_json, allowed_channels_json FROM discord_config WHERE id='discord-default'")
         secret_ready = bool(discord_config and discord_config['bot_secret_ref'] and app.state.secrets.configured(discord_config['bot_secret_ref']))
@@ -906,26 +907,49 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.get("/v1/routes")
     async def list_routes() -> list[dict]:
         rows = database.fetch_all("SELECT r.*, ro.name AS role_name FROM routes r JOIN roles ro ON ro.id = r.role_id ORDER BY ro.name, r.priority")
-        return [dict(row) for row in rows]
+        routes = [dict(row) for row in rows]
+        for route in routes:
+            route["targets"] = [dict(target) for target in database.fetch_all("SELECT provider_id, model_id, ordinal, enabled, conditions_json FROM route_targets WHERE route_id = ? ORDER BY ordinal", (route["id"],))]
+        return routes
+
+    def require_enabled_role(role_id: str) -> dict:
+        role = database.fetch_one("SELECT id, name, enabled FROM roles WHERE id = ?", (role_id,))
+        if role is None:
+            raise HTTPException(status_code=422, detail="The selected role does not exist. Refresh roles and choose a valid enabled role.")
+        if not role["enabled"]:
+            raise HTTPException(status_code=422, detail="The selected role is disabled and cannot own a route.")
+        return dict(role)
 
     @app.post("/v1/routes")
     async def create_route(request: RouteCreate) -> dict:
+        role = require_enabled_role(request.role_id)
         route_id = str(uuid.uuid4())
         database.execute("INSERT INTO routes(id, name, role_id, priority, policy_json) VALUES (?, ?, ?, ?, ?)", (route_id, request.name, request.role_id, request.priority, json.dumps({"strategy": request.strategy})))
         for target in request.targets:
             database.execute("INSERT INTO route_targets(route_id, provider_id, model_id, ordinal, enabled, conditions_json) VALUES (?, ?, ?, ?, ?, ?)", (route_id, target["provider_id"], target["model_id"], target.get("ordinal", 0), int(target.get("enabled", True)), json.dumps(target.get("conditions", {}))))
-        return {"id": route_id, "name": request.name}
+        return {"id": route_id, "name": request.name, "role_id": role["id"], "role_name": role["name"]}
 
     @app.put("/v1/routes/{route_id}")
     async def update_route(route_id: str, request: RouteUpdate) -> dict:
-        route = database.fetch_one("SELECT id FROM routes WHERE id = ?", (route_id,))
+        route = database.fetch_one("SELECT id, role_id FROM routes WHERE id = ?", (route_id,))
         if route is None:
             raise HTTPException(status_code=404, detail="Route not found")
-        database.execute("UPDATE routes SET priority = ?, policy_json = ? WHERE id = ?", (request.priority, json.dumps({"strategy": request.strategy}), route_id))
+        role_id = request.role_id or route["role_id"]
+        role = require_enabled_role(role_id)
+        database.execute("UPDATE routes SET role_id = ?, priority = ?, policy_json = ? WHERE id = ?", (role_id, request.priority, json.dumps({"strategy": request.strategy}), route_id))
         database.execute("DELETE FROM route_targets WHERE route_id = ?", (route_id,))
         for target in request.targets:
             database.execute("INSERT INTO route_targets(route_id, provider_id, model_id, ordinal, enabled, conditions_json) VALUES (?, ?, ?, ?, ?, ?)", (route_id, target["provider_id"], target["model_id"], target.get("ordinal", 0), int(target.get("enabled", True)), json.dumps(target.get("conditions", {}))))
-        return {"id": route_id, "updated": True}
+        return {"id": route_id, "updated": True, "role_id": role["id"], "role_name": role["name"]}
+
+    @app.delete("/v1/routes/{route_id}")
+    async def delete_route(route_id: str) -> dict:
+        route = database.fetch_one("SELECT id FROM routes WHERE id = ?", (route_id,))
+        if route is None:
+            raise HTTPException(status_code=404, detail="Route not found")
+        database.execute("DELETE FROM route_targets WHERE route_id = ?", (route_id,))
+        database.execute("DELETE FROM routes WHERE id = ?", (route_id,))
+        return {"id": route_id, "deleted": True}
 
     @app.get("/v1/routes/{route_id}/eligibility")
     async def route_eligibility(route_id: str) -> dict:
