@@ -108,6 +108,26 @@ def test_webui_edit_route_sends_selected_role_and_existing_targets():
     assert "targetSelect?.selectedOptions" in app
     assert "role_id:document.querySelector('#edit-route-role-select').value" in app
 
+def test_webui_delegated_execution_route_controls_use_persisted_ids():
+    app = APP.read_text()
+    assert "delegatedExecutionFromControls" in app
+    assert "new-route-worker-select" in app
+    assert "new-route-environment-select" in app
+    assert "route-worker-select" in app
+    assert "route-environment-select" in app
+    assert "fetch('/v1/workers')" in app
+    assert "fetch('/v1/environments')" in app
+
+
+def test_webui_route_create_and_update_submit_delegated_execution():
+    app = APP.read_text()
+    assert "delegated_execution=delegatedExecutionFromControls('#new-route-worker-select','#new-route-environment-select')" in app
+    assert "delegated_execution=delegatedExecutionFromControls('#route-worker-select','#route-environment-select')" in app
+    assert "delegated_execution})" in app
+    assert "selectedRoute.delegated_execution?.worker_id" in app
+    assert "selectedRoute.delegated_execution?.environment_id" in app
+
+
 def test_webui_chat_sidebar_uses_role_secretary_only():
     """Chat sidebar: if showing Secretary state, uses role-secretary lookup."""
     app = APP.read_text()

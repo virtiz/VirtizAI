@@ -108,12 +108,18 @@ class RoleCreate(BaseModel):
     requirements: dict = Field(default_factory=dict)
 
 
+class DelegatedExecutionConfig(BaseModel):
+    worker_id: str = Field(min_length=1)
+    environment_id: str = Field(min_length=1)
+
+
 class RouteCreate(BaseModel):
     name: str = Field(min_length=1)
     role_id: str = Field(min_length=1)
     strategy: str = "priority"
     priority: int = 100
     targets: list[dict] = Field(default_factory=list)
+    delegated_execution: DelegatedExecutionConfig | None = None
 
 
 class RouteUpdate(BaseModel):
@@ -121,6 +127,7 @@ class RouteUpdate(BaseModel):
     strategy: str = "priority"
     priority: int = 100
     targets: list[dict] = Field(default_factory=list)
+    delegated_execution: DelegatedExecutionConfig | None = None
 
 
 class RouteTargetCreate(BaseModel):
@@ -943,11 +950,32 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         database.execute("INSERT INTO roles(id, name, purpose, requirements_json) VALUES (?, ?, ?, ?)", (role_id, request.name, request.purpose, json.dumps(request.requirements)))
         return {"id": role_id, "name": request.name, "purpose": request.purpose}
 
+    def route_policy(strategy: str, delegated_execution: DelegatedExecutionConfig | None, existing_policy: dict | None = None) -> dict:
+        policy = dict(existing_policy) if isinstance(existing_policy, dict) else {}
+        policy["strategy"] = strategy
+        if delegated_execution is not None:
+            worker = database.fetch_one("SELECT id FROM workers WHERE id = ? AND enabled = 1", (delegated_execution.worker_id,))
+            environment = database.fetch_one("SELECT id FROM environment_targets WHERE id = ? AND enabled = 1", (delegated_execution.environment_id,))
+            if worker is None:
+                raise HTTPException(status_code=422, detail="Delegated execution worker does not exist or is disabled.")
+            if environment is None:
+                raise HTTPException(status_code=422, detail="Delegated execution environment does not exist or is disabled.")
+            policy["delegated_execution"] = delegated_execution.model_dump()
+        else:
+            policy.pop("delegated_execution", None)
+        return policy
+
     @app.get("/v1/routes")
     async def list_routes() -> list[dict]:
         rows = database.fetch_all("SELECT r.*, ro.name AS role_name FROM routes r JOIN roles ro ON ro.id = r.role_id ORDER BY ro.name, r.priority")
         routes = [dict(row) for row in rows]
         for route in routes:
+            try:
+                policy = json.loads(route["policy_json"] or "{}")
+            except json.JSONDecodeError:
+                policy = {}
+            route["strategy"] = policy.get("strategy", "priority") if isinstance(policy, dict) else "priority"
+            route["delegated_execution"] = policy.get("delegated_execution") if isinstance(policy, dict) else None
             route["targets"] = [dict(target) for target in database.fetch_all("SELECT provider_id, model_id, ordinal, enabled, conditions_json FROM route_targets WHERE route_id = ? ORDER BY ordinal", (route["id"],))]
         return routes
 
@@ -962,24 +990,33 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.post("/v1/routes")
     async def create_route(request: RouteCreate) -> dict:
         role = require_enabled_role(request.role_id)
+        policy = route_policy(request.strategy, request.delegated_execution)
         route_id = str(uuid.uuid4())
-        database.execute("INSERT INTO routes(id, name, role_id, priority, policy_json) VALUES (?, ?, ?, ?, ?)", (route_id, request.name, request.role_id, request.priority, json.dumps({"strategy": request.strategy})))
+        database.execute("INSERT INTO routes(id, name, role_id, priority, policy_json) VALUES (?, ?, ?, ?, ?)", (route_id, request.name, request.role_id, request.priority, json.dumps(policy)))
         for target in request.targets:
             database.execute("INSERT INTO route_targets(route_id, provider_id, model_id, ordinal, enabled, conditions_json) VALUES (?, ?, ?, ?, ?, ?)", (route_id, target["provider_id"], target["model_id"], target.get("ordinal", 0), int(target.get("enabled", True)), json.dumps(target.get("conditions", {}))))
-        return {"id": route_id, "name": request.name, "role_id": role["id"], "role_name": role["name"]}
+        return {"id": route_id, "name": request.name, "role_id": role["id"], "role_name": role["name"], "delegated_execution": policy.get("delegated_execution")}
 
     @app.put("/v1/routes/{route_id}")
     async def update_route(route_id: str, request: RouteUpdate) -> dict:
-        route = database.fetch_one("SELECT id, role_id FROM routes WHERE id = ?", (route_id,))
+        route = database.fetch_one("SELECT id, role_id, policy_json FROM routes WHERE id = ?", (route_id,))
         if route is None:
             raise HTTPException(status_code=404, detail="Route not found")
         role_id = request.role_id or route["role_id"]
         role = require_enabled_role(role_id)
-        database.execute("UPDATE routes SET role_id = ?, priority = ?, policy_json = ? WHERE id = ?", (role_id, request.priority, json.dumps({"strategy": request.strategy}), route_id))
+        try:
+            existing_policy = json.loads(route["policy_json"] or "{}")
+        except json.JSONDecodeError:
+            existing_policy = {}
+        execution = request.delegated_execution if "delegated_execution" in request.model_fields_set else existing_policy.get("delegated_execution")
+        if isinstance(execution, dict):
+            execution = DelegatedExecutionConfig.model_validate(execution)
+        policy = route_policy(request.strategy, execution, existing_policy)
+        database.execute("UPDATE routes SET role_id = ?, priority = ?, policy_json = ? WHERE id = ?", (role_id, request.priority, json.dumps(policy), route_id))
         database.execute("DELETE FROM route_targets WHERE route_id = ?", (route_id,))
         for target in request.targets:
             database.execute("INSERT INTO route_targets(route_id, provider_id, model_id, ordinal, enabled, conditions_json) VALUES (?, ?, ?, ?, ?, ?)", (route_id, target["provider_id"], target["model_id"], target.get("ordinal", 0), int(target.get("enabled", True)), json.dumps(target.get("conditions", {}))))
-        return {"id": route_id, "updated": True, "role_id": role["id"], "role_name": role["name"]}
+        return {"id": route_id, "updated": True, "role_id": role["id"], "role_name": role["name"], "delegated_execution": policy.get("delegated_execution")}
 
     @app.delete("/v1/routes/{route_id}")
     async def delete_route(route_id: str) -> dict:

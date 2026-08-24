@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,82 @@ async def test_routes_require_explicit_enabled_role_and_are_mutable_without_sess
 
     session = db.fetch_one("SELECT affinity_provider_id, affinity_model_id FROM sessions WHERE id = ?", ("session-test",))
     assert dict(session) == {"affinity_provider_id": "provider-test", "affinity_model_id": "model-test"}
+
+
+@pytest.mark.asyncio
+async def test_routes_persist_validated_delegated_execution_selection(tmp_path: Path) -> None:
+    app = create_app(config_for(tmp_path))
+    db = app.state.database
+    db.execute("INSERT INTO providers(id, name, adapter_type, endpoint, enabled, health_status, config_json) VALUES (?, ?, ?, ?, ?, ?, ?)", ("provider-test", "Provider", "ollama", "http://example", 1, "healthy", "{}"))
+    db.execute("INSERT INTO models(id, provider_id, name, capabilities_json, status, metadata_json) VALUES (?, ?, ?, ?, ?, ?)", ("model-test", "provider-test", "phi", "{}", "healthy", "{}"))
+    db.execute("INSERT INTO workers(id, name, worker_type, enabled, status, capabilities_json, config_json) VALUES (?, ?, ?, ?, ?, ?, ?)", ("worker-test", "Worker", "dev_tools", 1, "healthy", "[]", "{}"))
+    db.execute("INSERT INTO environment_targets(id, name, target_type, enabled, status, capabilities_json, config_json) VALUES (?, ?, ?, ?, ?, ?, ?)", ("environment-test", "Environment", "workspace", 1, "healthy", "[]", "{}"))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        payload = {"name": "Coding", "role_id": "role-coding", "targets": [{"provider_id": "provider-test", "model_id": "model-test"}], "delegated_execution": {"worker_id": "worker-test", "environment_id": "environment-test"}}
+        created = await client.post("/v1/routes", json=payload)
+        assert created.status_code == 200
+        route_id = created.json()["id"]
+        assert created.json()["delegated_execution"] == payload["delegated_execution"]
+        listed = await client.get("/v1/routes")
+        assert listed.status_code == 200
+        assert listed.json()[0]["delegated_execution"] == payload["delegated_execution"]
+
+        preserved = await client.put(f"/v1/routes/{route_id}", json={"strategy": "priority", "targets": payload["targets"]})
+        assert preserved.status_code == 200
+        assert preserved.json()["delegated_execution"] == payload["delegated_execution"]
+
+        rejected = await client.put(f"/v1/routes/{route_id}", json={"strategy": "priority", "targets": payload["targets"], "delegated_execution": {"worker_id": "missing", "environment_id": "environment-test"}})
+        assert rejected.status_code == 422
+        assert "worker" in rejected.json()["detail"].lower()
+
+        cleared = await client.put(f"/v1/routes/{route_id}", json={"strategy": "priority", "targets": payload["targets"], "delegated_execution": None})
+        assert cleared.status_code == 200
+        assert cleared.json()["delegated_execution"] is None
+
+
+@pytest.mark.asyncio
+async def test_delegated_execution_route_validation_and_policy_merge(tmp_path: Path) -> None:
+    app = create_app(config_for(tmp_path))
+    db = app.state.database
+    db.execute("INSERT INTO providers(id, name, adapter_type, endpoint, enabled, health_status, config_json) VALUES (?, ?, ?, ?, ?, ?, ?)", ("provider-test", "Provider", "ollama", "http://example", 1, "healthy", "{}"))
+    db.execute("INSERT INTO models(id, provider_id, name, capabilities_json, status, metadata_json) VALUES (?, ?, ?, ?, ?, ?)", ("model-test", "provider-test", "phi", "{}", "healthy", "{}"))
+    for worker_id, enabled in (("worker-one", 1), ("worker-two", 1), ("worker-disabled", 0)):
+        db.execute("INSERT INTO workers(id, name, worker_type, enabled, status, capabilities_json, config_json) VALUES (?, ?, ?, ?, ?, ?, ?)", (worker_id, worker_id, "dev_tools", enabled, "healthy", "[]", "{}"))
+    for environment_id, enabled in (("environment-one", 1), ("environment-two", 1), ("environment-disabled", 0)):
+        db.execute("INSERT INTO environment_targets(id, name, target_type, enabled, status, capabilities_json, config_json) VALUES (?, ?, ?, ?, ?, ?, ?)", (environment_id, environment_id, "workspace", enabled, "healthy", "[]", "{}"))
+
+    targets = [{"provider_id": "provider-test", "model_id": "model-test", "ordinal": 0}]
+    first = {"worker_id": "worker-one", "environment_id": "environment-one"}
+    second = {"worker_id": "worker-two", "environment_id": "environment-two"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/v1/routes", json={"name": "Coding", "role_id": "role-coding", "strategy": "balanced", "priority": 7, "targets": targets, "delegated_execution": first})
+        assert created.status_code == 200
+        route_id = created.json()["id"]
+        db.execute("UPDATE routes SET policy_json=? WHERE id=?", (json.dumps({"strategy": "balanced", "retained_policy": "keep", "delegated_execution": first}), route_id))
+
+        updated = await client.put(f"/v1/routes/{route_id}", json={"strategy": "lowest_latency", "priority": 4, "targets": targets, "delegated_execution": second})
+        assert updated.status_code == 200
+        listed = (await client.get("/v1/routes")).json()[0]
+        assert listed["delegated_execution"] == second
+        assert listed["strategy"] == "lowest_latency"
+        assert listed["priority"] == 4
+        assert listed["targets"][0]["model_id"] == "model-test"
+        policy = json.loads(db.fetch_one("SELECT policy_json FROM routes WHERE id=?", (route_id,))["policy_json"])
+        assert policy["retained_policy"] == "keep"
+
+        for execution, expected in (
+            ({"worker_id": "missing", "environment_id": "environment-one"}, "worker"),
+            ({"worker_id": "worker-one", "environment_id": "missing"}, "environment"),
+            ({"worker_id": "worker-disabled", "environment_id": "environment-one"}, "worker"),
+            ({"worker_id": "worker-one", "environment_id": "environment-disabled"}, "environment"),
+        ):
+            response = await client.put(f"/v1/routes/{route_id}", json={"strategy": "lowest_latency", "priority": 4, "targets": targets, "delegated_execution": execution})
+            assert response.status_code == 422
+            assert expected in response.json()["detail"].lower()
+
+        partial = await client.put(f"/v1/routes/{route_id}", json={"strategy": "lowest_latency", "priority": 4, "targets": targets, "delegated_execution": {"worker_id": "worker-one"}})
+        assert partial.status_code == 422
 
 
 @pytest.mark.asyncio
