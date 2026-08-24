@@ -8,6 +8,7 @@ from .db import Database
 from .services import CoreService, SecretaryResponse
 from .orchestration import AgentWorkRequest, DelegationService
 from .policy import CommunicationPolicy, normalize_policy
+from .delegation_policy import DelegationPolicyEngine
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class InterfaceService:
         self.database = database
         self.core = core
         self.delegation = delegation
+        self.delegation_policy = DelegationPolicyEngine(database, getattr(core, "providers", None), getattr(core, "_secretary_candidates", None))
 
     def resolve_user(self, interface_type: str, external_subject: str, display_name: str = "User") -> str:
         row = self.database.fetch_one("SELECT user_id FROM interface_identities WHERE interface_type = ? AND external_subject = ?", (interface_type, external_subject))
@@ -67,6 +69,11 @@ class InterfaceService:
         override = self.database.fetch_one("SELECT response_verbosity, execution_updates, tool_details FROM interface_preferences WHERE user_id = ? AND interface_type = ?", (user_id, request.interface_type))
         inherited = dict(override or base) if (override or base) else None
         policy = normalize_policy(request.response_verbosity, request.execution_updates, request.tool_details, CommunicationPolicy(**inherited) if inherited else None)
+        decision = await self.delegation_policy.decide(request.content)
+        if decision.decision == "delegate" and self.delegation is not None:
+            session_id, response = await self.delegate_for_session(request, decision.role_id or "", decision.objective)
+            self.database.execute("INSERT INTO interface_events(interface_type,user_id,session_id,event_type,metadata_json) VALUES (?,?,?,?,?)", (request.interface_type, user_id, session_id, "delegation_decision", json.dumps(decision.metadata())))
+            return session_id, response
         response = await self.core.handle_message(
             user_id, session_id, request.content, request.display_name, policy,
             request.interface_type,

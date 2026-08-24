@@ -7,6 +7,7 @@ from virtizai_core.discord import DiscordAdapter
 from virtizai_core.interfaces import InterfaceRequest, InterfaceService
 from virtizai_core.orchestration import AgentWorkRequest
 from virtizai_core.services import SecretaryResponse, SessionService
+from virtizai_core.delegation_policy import DelegationPolicyEngine
 
 class FakeDelegation:
  def __init__(self,db): self.db=db;self.requests=[]
@@ -26,9 +27,31 @@ async def test_generic_interface_delegation_resolves_canonical_persisted_plan(tm
 @pytest.mark.asyncio
 async def test_discord_explicit_trigger_calls_generic_interface_role(tmp_path):
  class Interfaces:
-  async def delegate_for_session(self,request,role,objective):
-   self.args=(request,role,objective);return 's',SecretaryResponse('r','s','m','done',None,'p','m',job_created=True,task_class='delegated')
-  async def handle(self,request): raise AssertionError('legacy path')
+  async def handle(self,request):
+   self.args=request;return 's',SecretaryResponse('r','s','m','done',None,'p','m',job_created=True,task_class='delegated')
  interfaces=Interfaces();adapter=DiscordAdapter(interfaces,SimpleNamespace())
  reply=await adapter.handle_message('user','/coding inspect README',session_key='k')
- assert interfaces.args[1:]==('role-coding','inspect README') and reply.content=='done'
+ assert interfaces.args.content=='/coding inspect README' and reply.content=='done'
+
+def test_hybrid_deterministic_rules_are_conservative(tmp_path):
+ db,_,_=setup(tmp_path);policy=DelegationPolicyEngine(db)
+ assert policy.deterministic('/coding inspect README.md').role_id=='role-coding'
+ assert policy.deterministic('Fix the source file parser').role_id=='role-coding'
+ assert policy.deterministic('Explain this architecture') is None
+ assert policy.deterministic('What is Python?') is None
+ db.close()
+
+@pytest.mark.asyncio
+async def test_model_classifier_confidence_and_malformed_output(tmp_path):
+ db,_,_=setup(tmp_path)
+ class Provider:
+  def __init__(self,args): self.args=args
+  async def chat(self,*args,**kwargs): return SimpleNamespace(tool_calls=(self.args,))
+ async def candidates(): return [SimpleNamespace(provider_id='p',model_name='M')]
+ good={"function":{"name":"delegation_decision","arguments":{"decision":"delegate","role_id":"role-coding","confidence":0.9,"reason_code":"coding_request"}}}
+ assert (await DelegationPolicyEngine(db,Provider(good),candidates).decide('please help')).decision=='delegate'
+ low={"function":{"name":"delegation_decision","arguments":{"decision":"delegate","role_id":"role-coding","confidence":0.5,"reason_code":"coding_request"}}}
+ assert (await DelegationPolicyEngine(db,Provider(low),candidates).decide('please help')).decision=='direct'
+ bad={"function":{"name":"delegation_decision","arguments":"not-json"}}
+ assert (await DelegationPolicyEngine(db,Provider(bad),candidates).decide('please help')).decision=='direct'
+ db.close()
