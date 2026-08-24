@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from .adapters import DiscoveredModel, InferenceResponse, MockProviderAdapter, OllamaAdapter, ProviderAdapter
+from .adapters import DiscoveredModel, InferenceResponse, MockProviderAdapter, OllamaAdapter, OpenAICompatibleAdapter, ProviderAdapter
 from .db import Database
 
 
@@ -23,6 +23,9 @@ class ProviderRegistry:
             if provider["adapter_type"] == "ollama":
                 config = json.loads(provider["config_json"] or "{}")
                 self.register_adapter(provider["id"], self._adapter("ollama", provider["endpoint"], config))
+            elif provider["adapter_type"] == "openai_compatible":
+                config = json.loads(provider["config_json"] or "{}")
+                self.register_adapter(provider["id"], self._adapter("openai_compatible", provider["endpoint"], config))
             elif provider["adapter_type"] == "mock":
                 models = [row["name"] for row in self.database.fetch_all("SELECT name FROM models WHERE provider_id = ?", (provider["id"],))]
                 self.register_adapter(provider["id"], MockProviderAdapter(models, response_prefix=provider["name"]))
@@ -56,6 +59,12 @@ class ProviderRegistry:
             if not endpoint:
                 raise ValueError("Ollama providers require an endpoint")
             return OllamaAdapter(endpoint, float(config.get("timeout_seconds", 20)), config.get("chat_options"))
+        if adapter_type == "openai_compatible":
+            base_url = config.get("base_url")
+            if not isinstance(base_url, str) or not base_url.strip(): raise ValueError("OpenAI-compatible providers require config.base_url")
+            api_key = config.get("api_key")
+            if api_key is not None and not isinstance(api_key, str): raise ValueError("OpenAI-compatible config.api_key must be a string")
+            return OpenAICompatibleAdapter(base_url, float(config.get("timeout_seconds", 20)), api_key, config.get("chat_options"))
         raise ValueError(f"Unsupported adapter type: {adapter_type}")
 
     def adapter_for(self, provider_id: str) -> ProviderAdapter:
@@ -73,10 +82,10 @@ class ProviderRegistry:
     async def health(self, provider_id: str):
         return await self.adapter_for(provider_id).health()
 
-    async def chat(self, provider_id: str, model_name: str, messages: list[dict[str, str]], max_tokens: int | None = None) -> InferenceResponse:
+    async def chat(self, provider_id: str, model_name: str, messages: list[dict[str, str]], max_tokens: int | None = None, tools: list[dict[str, Any]] | None = None, tool_choice: Any = None) -> InferenceResponse:
         row = self.database.fetch_one("SELECT user_overrides_json FROM models WHERE provider_id=? AND name=?", (provider_id, model_name))
         overrides = json.loads((row["user_overrides_json"] if row else "{}") or "{}")
-        return await self.adapter_for(provider_id).chat(messages, model_name, max_tokens, overrides.get("keep_alive"))
+        return await self.adapter_for(provider_id).chat(messages, model_name, max_tokens, overrides.get("keep_alive"), tools, tool_choice)
 
     async def prewarm(self, provider_id: str, model_name: str) -> float:
         row = self.database.fetch_one("SELECT user_overrides_json FROM models WHERE provider_id=? AND name=?", (provider_id, model_name))
@@ -116,7 +125,15 @@ class ProviderRegistry:
         self.database.execute("UPDATE models SET user_overrides_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (json.dumps(overrides), model_id))
 
     def list_providers(self) -> list[dict]:
-        return [dict(row) for row in self.database.fetch_all("SELECT * FROM providers ORDER BY name")]
+        return [self._public_provider(dict(row)) for row in self.database.fetch_all("SELECT * FROM providers ORDER BY name")]
+
+    @staticmethod
+    def _public_provider(provider: dict) -> dict:
+        config = json.loads(provider.get("config_json") or "{}")
+        if isinstance(config, dict):
+            for key in ("api_key", "authorization", "token", "password"): config.pop(key, None)
+        provider["config_json"] = json.dumps(config)
+        return provider
 
     def list_models(self) -> list[dict]:
         return [dict(row) for row in self.database.fetch_all("SELECT m.*, p.name AS provider_name FROM models m JOIN providers p ON p.id = m.provider_id ORDER BY p.name, m.name")]

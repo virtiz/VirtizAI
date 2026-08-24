@@ -28,6 +28,7 @@ from .providers import ProviderRegistry
 from .registries import (
     EnvironmentRegistry,
     IntegrationRegistry,
+    WorkerRegistry,
     ProjectRegistry,
     ToolRegistry,
     UpdateManager,
@@ -40,7 +41,9 @@ from .retention import RetentionService
 from .interfaces import InterfaceRequest, InterfaceService
 from .discord import DiscordAdapter
 from .discord_gateway import DiscordGateway
-from .workers import CodexWorker
+from .workers import CodexWorker, WorkerExecutionBoundary
+from .dev_tools import DevelopmentToolsExecutor
+from .orchestration import DelegationService
 from .secrets import FileSecretStore
 from .transactions import StartupTransactionReconciler
 from .updates import NativeUpdateHelper, StartupUpdateReconciler, UpdateCoordinator, UpdateFailure
@@ -68,6 +71,28 @@ class JobCreate(BaseModel):
     payload: dict = Field(default_factory=dict)
     user_id: str | None = None
     session_id: str | None = None
+    project_id: str | None = None
+    role_id: str | None = None
+    provider_id: str | None = None
+    model_id: str | None = None
+    worker_id: str | None = None
+    environment_id: str | None = None
+    objective: str | None = None
+
+
+class JobStatusUpdate(BaseModel):
+    status: str
+    result_summary: str | None = None
+    error_summary: str | None = None
+
+
+class WorkerCreate(BaseModel):
+    name: str = Field(min_length=1)
+    worker_type: str = Field(min_length=1)
+    enabled: bool = True
+    status: str = "unknown"
+    capabilities: list[str] = Field(default_factory=list)
+    config: dict = Field(default_factory=dict)
 
 
 class ProviderCreate(BaseModel):
@@ -151,6 +176,9 @@ class EnvironmentCreate(BaseModel):
     address: str | None = None
     credential_ref: str | None = None
     capabilities: list[str] = Field(default_factory=list)
+    enabled: bool = True
+    status: str = "unknown"
+    config: dict = Field(default_factory=dict)
 
 
 class MemoryCreate(BaseModel):
@@ -306,6 +334,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.events = OperationalEventService(database)
     codex_worker = CodexWorker(app_config.workspace_dir)
     app.state.codex_worker = codex_worker
+    app.state.worker_execution = WorkerExecutionBoundary(database)
+    app.state.worker_execution.register(DevelopmentToolsExecutor())
     jobs.register_handler("codex_worker", codex_worker.run)
     core = CoreService(database, telemetry, jobs, providers, codex_worker, app.state.events)
     app.state.auth = AuthAdminService(database)
@@ -315,6 +345,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.health = HealthManager(database, providers.adapters, app.state.events)
     app.state.projects = ProjectRegistry(database)
     app.state.environments = EnvironmentRegistry(database)
+    app.state.workers = WorkerRegistry(database)
     app.state.integrations = IntegrationRegistry(database)
     app.state.memory = MemoryService(database)
     app.state.updates = UpdateManager(database)
@@ -326,7 +357,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.database = database
     app.state.jobs = jobs
     app.state.core = core
-    app.state.interfaces = InterfaceService(database, core)
+    app.state.delegation = DelegationService(database, jobs, app.state.worker_execution, providers)
+    app.state.interfaces = InterfaceService(database, core, app.state.delegation)
     app.state.discord = DiscordAdapter(app.state.interfaces, app.state.updates)
     app.state.secrets = FileSecretStore(app_config.data_dir / "secrets.json")
     app.state.discord_gateway = DiscordGateway(app.state.discord, database, app.state.secrets, jobs, app.state.events)
@@ -753,8 +785,15 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.post("/v1/environments")
     async def create_environment(request: EnvironmentCreate) -> dict:
         target_id = app.state.environments.create(request.name, request.target_type, request.address, request.credential_ref)
-        database.execute("UPDATE environment_targets SET capabilities_json = ? WHERE id = ?", (json.dumps(request.capabilities), target_id))
+        database.execute("UPDATE environment_targets SET capabilities_json = ?, enabled = ?, status = ?, config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?", (json.dumps(request.capabilities), int(request.enabled), request.status, json.dumps(request.config), target_id))
         return dict(database.fetch_one("SELECT * FROM environment_targets WHERE id = ?", (target_id,)))
+
+    @app.get("/v1/environments/{target_id}")
+    async def get_environment(target_id: str) -> dict:
+        environment = database.fetch_one("SELECT * FROM environment_targets WHERE id = ?", (target_id,))
+        if environment is None:
+            raise HTTPException(status_code=404, detail="Environment not found")
+        return dict(environment)
 
     @app.delete("/v1/environments/{target_id}")
     async def delete_environment(target_id: str) -> dict:
@@ -844,7 +883,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             provider_id = providers.create_provider(request.name, request.adapter_type, request.endpoint, request.config)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return dict(database.fetch_one("SELECT * FROM providers WHERE id = ?", (provider_id,)))
+        return providers._public_provider(dict(database.fetch_one("SELECT * FROM providers WHERE id = ?", (provider_id,))))
 
     @app.post("/v1/providers/{provider_id}/health")
     async def check_provider(provider_id: str) -> dict:
@@ -1058,11 +1097,34 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
 
     @app.post("/v1/jobs")
     async def create_job(request: JobCreate) -> dict:
-        job_id = await jobs.submit(
-            request.kind,
-            request.payload,
-            request.user_id,
-            request.session_id,
+        def require_reference(table: str, reference_id: str | None, label: str) -> None:
+            if reference_id is not None and database.fetch_one(f"SELECT id FROM {table} WHERE id = ?", (reference_id,)) is None:
+                raise HTTPException(status_code=422, detail=f"The selected {label} does not exist.")
+
+        require_reference("sessions", request.session_id, "session")
+        require_reference("projects", request.project_id, "project")
+        require_reference("roles", request.role_id, "agent")
+        require_reference("providers", request.provider_id, "provider")
+        require_reference("workers", request.worker_id, "worker")
+        require_reference("environment_targets", request.environment_id, "environment")
+        if request.model_id is not None:
+            model = database.fetch_one("SELECT provider_id FROM models WHERE id = ?", (request.model_id,))
+            if model is None or (request.provider_id is not None and model["provider_id"] != request.provider_id):
+                raise HTTPException(status_code=422, detail="The selected model does not exist for the selected provider.")
+        if request.worker_id is not None and not database.fetch_one("SELECT id FROM workers WHERE id = ? AND enabled = 1", (request.worker_id,)):
+            raise HTTPException(status_code=422, detail="The selected worker is disabled and cannot accept a runnable job.")
+        if request.environment_id is not None and not database.fetch_one("SELECT id FROM environment_targets WHERE id = ? AND enabled = 1", (request.environment_id,)):
+            raise HTTPException(status_code=422, detail="The selected environment is disabled and cannot accept a runnable job.")
+
+        if request.kind == "codex_worker" and request.worker_id is None:
+            job_id = await jobs.submit(request.kind, request.payload, request.user_id, request.session_id)
+            return {"job_id": job_id, "status": "queued"}
+
+        job_id = jobs.create_delegated(
+            kind=request.kind, payload=request.payload, user_id=request.user_id, session_id=request.session_id,
+            project_id=request.project_id, role_id=request.role_id, provider_id=request.provider_id,
+            model_id=request.model_id, worker_id=request.worker_id, environment_target_id=request.environment_id,
+            objective=request.objective,
         )
         return {"job_id": job_id, "status": "queued"}
 
@@ -1080,7 +1142,33 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         active = database.fetch_one("SELECT COUNT(*) AS count FROM jobs WHERE kind='codex_worker' AND status IN ('queued','running')")
         last = database.fetch_one("SELECT id,status,created_at,finished_at FROM jobs WHERE kind='codex_worker' ORDER BY created_at DESC LIMIT 1")
         worker = app.state.codex_worker
-        return [{"name":"Codex CLI","type":"worker","kind":"codex_worker","available":bool(shutil.which(worker.executable) or Path(worker.executable).exists()),"authenticated":None,"active_jobs":int(active["count"]),"last_job":dict(last) if last else None,"workspace_root":str(worker.workspace_root)}]
+        legacy = {"name":"Codex CLI","type":"worker","kind":"codex_worker","available":bool(shutil.which(worker.executable) or Path(worker.executable).exists()),"authenticated":None,"active_jobs":int(active["count"]),"last_job":dict(last) if last else None,"workspace_root":str(worker.workspace_root)}
+        return [legacy, *[dict(row) for row in database.fetch_all("SELECT * FROM workers ORDER BY name")]]
+
+    @app.post("/v1/workers")
+    async def create_worker(request: WorkerCreate) -> dict:
+        worker_id = app.state.workers.create(request.name, request.worker_type, request.enabled, request.status, request.capabilities, request.config)
+        return dict(database.fetch_one("SELECT * FROM workers WHERE id = ?", (worker_id,)))
+
+    @app.get("/v1/workers/{worker_id}")
+    async def get_worker(worker_id: str) -> dict:
+        worker = database.fetch_one("SELECT * FROM workers WHERE id = ?", (worker_id,))
+        if worker is None:
+            raise HTTPException(status_code=404, detail="Worker not found")
+        return dict(worker)
+
+    @app.patch("/v1/jobs/{job_id}/status")
+    async def transition_job_status(job_id: str, request: JobStatusUpdate) -> dict:
+        try:
+            job = jobs.transition(job_id, request.status)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        if request.result_summary is not None or request.error_summary is not None:
+            database.execute("UPDATE jobs SET result_summary = COALESCE(?, result_summary), error_summary = COALESCE(?, error_summary) WHERE id = ?", (request.result_summary, request.error_summary, job_id))
+            job = jobs.get(job_id)
+        return job
 
     @app.get("/v1/jobs/{job_id}")
     async def get_job(job_id: str) -> dict:

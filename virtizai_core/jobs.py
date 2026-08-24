@@ -89,6 +89,55 @@ class JobManager:
         finally:
             self.tasks.pop(job_id, None)
 
+    def create_delegated(
+        self,
+        *,
+        kind: str,
+        payload: dict,
+        user_id: str | None,
+        session_id: str | None,
+        project_id: str | None,
+        role_id: str | None,
+        provider_id: str | None,
+        model_id: str | None,
+        worker_id: str | None,
+        environment_target_id: str | None,
+        objective: str | None,
+    ) -> str:
+        """Persist a delegated job without scheduling execution."""
+        job_id = str(uuid.uuid4())
+        self.database.execute(
+            """
+            INSERT INTO jobs(
+                id, user_id, session_id, project_id, role_id, provider_id, model_id,
+                worker_id, environment_target_id, kind, status, objective, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+            """,
+            (
+                job_id, user_id, session_id, project_id, role_id, provider_id, model_id,
+                worker_id, environment_target_id, kind, objective, json.dumps(payload),
+            ),
+        )
+        return job_id
+
+    def transition(self, job_id: str, status: str) -> dict | None:
+        """Apply the bounded state machine for a durable delegated job."""
+        job = self.get(job_id)
+        if job is None:
+            return None
+        allowed = {
+            "queued": {"running", "cancelled"},
+            "running": {"succeeded", "failed", "cancelled"},
+        }
+        if status not in allowed.get(job["status"], set()):
+            raise ValueError(f"Job cannot transition from {job['status']} to {status}.")
+        timestamp_column = "started_at" if status == "running" else "finished_at"
+        self.database.execute(
+            f"UPDATE jobs SET status = ?, {timestamp_column} = ? WHERE id = ?",
+            (status, now_iso(), job_id),
+        )
+        return self.get(job_id)
+
     def get(self, job_id: str) -> dict | None:
         row = self.database.fetch_one("SELECT * FROM jobs WHERE id = ?", (job_id,))
         return dict(row) if row else None

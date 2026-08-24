@@ -64,6 +64,27 @@ class EnvironmentRegistry:
         return target_id
 
 
+class WorkerRegistry:
+    """Registry for configured workers; it does not execute work."""
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+
+    def create(
+        self, name: str, worker_type: str, enabled: bool = True, status: str = "unknown",
+        capabilities: list[str] | None = None, config: dict | None = None,
+    ) -> str:
+        worker_id = str(uuid.uuid4())
+        self.database.execute(
+            """
+            INSERT INTO workers(id, name, worker_type, enabled, status, capabilities_json, config_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (worker_id, name, worker_type, int(enabled), status, json.dumps(capabilities or []), json.dumps(config or {})),
+        )
+        return worker_id
+
+
 class ToolRegistry:
     def __init__(self, database: Database) -> None:
         self.database = database

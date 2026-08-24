@@ -25,7 +25,11 @@ class DiscordAdapter:
         self.release_events: list[dict] = []
 
     async def handle_message(self, user_id: str, content: str, session_key: str | None = None, session_id: str | None = None, display_name: str = "Discord user") -> DiscordReply:
-        session_id, response = await self.interfaces.handle(InterfaceRequest("discord", user_id, content, session_key=session_key, session_id=session_id, display_name=display_name))
+        request = InterfaceRequest("discord", user_id, content, session_key=session_key, session_id=session_id, display_name=display_name)
+        if content.startswith("/coding ") and content[8:].strip():
+            session_id, response = await self.interfaces.delegate_for_session(request, "role-coding", content[8:].strip())
+        else:
+            session_id, response = await self.interfaces.handle(request)
         metadata = {"model": response.model_name or response.model_id, "provider": response.provider_name or response.provider_id, "tokens": response.total_tokens, "latency_ms": response.latency_ms, "local": bool(response.provider_id), "job_created": response.job_created, "task_class": response.task_class}
         return DiscordReply(response.content, session_id, metadata)
 

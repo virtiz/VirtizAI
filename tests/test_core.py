@@ -34,7 +34,7 @@ async def test_health_schema_and_restart_preserve_state(tmp_path: Path) -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         health = await client.get("/healthz")
         assert health.status_code == 200
-        assert health.json()["schema_version"] == 16
+        assert health.json()["schema_version"] == 17
         assert (await client.get("/")).status_code == 200
         assert (await client.get("/static/styles.css")).status_code == 200
         created = await client.post("/v1/sessions", json={"user_id": "user-1"})
@@ -60,12 +60,12 @@ def test_wal_and_migrations_are_versioned(tmp_path: Path) -> None:
     database.open()
     journal_mode = database.fetch_one("PRAGMA journal_mode")[0]
     assert journal_mode.lower() == "wal"
-    assert database.fetch_one("SELECT MAX(version) FROM schema_migrations")[0] == 16
+    assert database.fetch_one("SELECT MAX(version) FROM schema_migrations")[0] == 17
     database.close()
 
     reopened = Database(tmp_path / "state.db")
     reopened.open()
-    assert reopened.fetch_one("SELECT COUNT(*) FROM schema_migrations")[0] == 16
+    assert reopened.fetch_one("SELECT COUNT(*) FROM schema_migrations")[0] == 17
     reopened.close()
 
 

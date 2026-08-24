@@ -681,6 +681,49 @@ def migration_16(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, updated_at)")
 
 
+def migration_17(connection: sqlite3.Connection) -> None:
+    """Add durable delegated-job, worker, and environment contracts."""
+    connection.executescript("""
+        CREATE TABLE IF NOT EXISTS workers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            worker_type TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'unknown',
+            capabilities_json TEXT NOT NULL DEFAULT '[]',
+            config_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    job_columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+    additions = {
+        "project_id": "TEXT REFERENCES projects(id)",
+        "role_id": "TEXT REFERENCES roles(id)",
+        "provider_id": "TEXT REFERENCES providers(id)",
+        "model_id": "TEXT REFERENCES models(id)",
+        "worker_id": "TEXT REFERENCES workers(id)",
+        "environment_target_id": "TEXT REFERENCES environment_targets(id)",
+        "objective": "TEXT",
+        "result_summary": "TEXT",
+        "error_summary": "TEXT",
+    }
+    for name, definition in additions.items():
+        if name not in job_columns:
+            connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+    environment_columns = {row[1] for row in connection.execute("PRAGMA table_info(environment_targets)")}
+    additions = {
+        "enabled": "INTEGER NOT NULL DEFAULT 1",
+        "status": "TEXT NOT NULL DEFAULT 'unknown'",
+        "config_json": "TEXT NOT NULL DEFAULT '{}'",
+    }
+    for name, definition in additions.items():
+        if name not in environment_columns:
+            connection.execute(f"ALTER TABLE environment_targets ADD COLUMN {name} {definition}")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_jobs_project_created ON jobs(project_id, created_at)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_jobs_worker_status ON jobs(worker_id, status)")
+
+
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -698,6 +741,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (14, migration_14),
     (15, migration_15),
     (16, migration_16),
+    (17, migration_17),
 )
 
 

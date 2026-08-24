@@ -4,8 +4,12 @@ import asyncio
 import json
 import os
 import shutil
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Protocol
+
+from .db import Database
 
 
 @dataclass(frozen=True)
@@ -46,6 +50,93 @@ class TaskClassifier:
         if any(signal in text for signal in self.medium):
             return TaskClassification("medium", "reasoning or planning signal")
         return TaskClassification("simple", "default conversational request")
+
+
+@dataclass(frozen=True)
+class ExecutionRequest:
+    worker_id: str
+    environment_id: str
+    operation: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    timeout_seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    status: str
+    output: dict[str, Any] = field(default_factory=dict)
+    error_summary: str | None = None
+    duration_ms: float | None = None
+
+
+class WorkerExecutor(Protocol):
+    worker_type: str
+
+    async def execute(self, request: ExecutionRequest, worker: dict, environment: dict) -> ExecutionResult: ...
+
+
+class WorkerExecutionError(RuntimeError):
+    pass
+
+
+class WorkerExecutionBoundary:
+    """Resolve configured workers and validate environments before structured execution."""
+
+    _unavailable_states = {"disabled", "unavailable", "offline", "error", "failed"}
+
+    def __init__(self, database: Database) -> None:
+        self.database = database
+        self.executors: dict[str, WorkerExecutor] = {}
+
+    def register(self, executor: WorkerExecutor) -> None:
+        worker_type = getattr(executor, "worker_type", "")
+        if not isinstance(worker_type, str) or not worker_type.strip():
+            raise ValueError("Worker executors require a worker_type")
+        self.executors[worker_type] = executor
+
+    @staticmethod
+    def _json(value: str | None) -> dict:
+        try:
+            parsed = json.loads(value or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+        worker_row = self.database.fetch_one("SELECT * FROM workers WHERE id = ?", (request.worker_id,))
+        if worker_row is None:
+            raise WorkerExecutionError("Worker not found")
+        environment_row = self.database.fetch_one("SELECT * FROM environment_targets WHERE id = ?", (request.environment_id,))
+        if environment_row is None:
+            raise WorkerExecutionError("Environment not found")
+        worker, environment = dict(worker_row), dict(environment_row)
+        if not worker["enabled"]:
+            raise WorkerExecutionError("Worker is disabled")
+        if not environment["enabled"]:
+            raise WorkerExecutionError("Environment is disabled")
+        if worker["status"] in self._unavailable_states:
+            raise WorkerExecutionError("Worker is unavailable")
+        if environment["status"] in self._unavailable_states:
+            raise WorkerExecutionError("Environment is unavailable")
+        executor = self.executors.get(worker["worker_type"])
+        if executor is None:
+            raise WorkerExecutionError(f"Unknown worker type: {worker['worker_type']}")
+        worker_config, environment_config = self._json(worker["config_json"]), self._json(environment["config_json"])
+        required = set(worker_config.get("required_environment_capabilities", []))
+        provided = set(json.loads(environment["capabilities_json"] or "[]"))
+        if not required.issubset(provided):
+            raise WorkerExecutionError("Worker and environment capabilities are incompatible")
+        allowed_types = environment_config.get("allowed_worker_types")
+        if isinstance(allowed_types, list) and worker["worker_type"] not in allowed_types:
+            raise WorkerExecutionError("Worker type is not allowed by environment")
+        started = time.perf_counter()
+        try:
+            result = await executor.execute(request, worker, environment)
+        except Exception:
+            return ExecutionResult("failed", error_summary="Worker executor failed", duration_ms=(time.perf_counter() - started) * 1000)
+        if not isinstance(result, ExecutionResult):
+            return ExecutionResult("failed", error_summary="Worker executor returned an invalid result", duration_ms=(time.perf_counter() - started) * 1000)
+        return ExecutionResult(result.status, result.output, result.error_summary, result.duration_ms if result.duration_ms is not None else (time.perf_counter() - started) * 1000)
 
 
 class CodexWorker:

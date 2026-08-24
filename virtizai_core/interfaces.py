@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from .db import Database
 from .services import CoreService, SecretaryResponse
+from .orchestration import AgentWorkRequest, DelegationService
 from .policy import CommunicationPolicy, normalize_policy
 
 
@@ -25,9 +26,10 @@ class InterfaceRequest:
 class InterfaceService:
     """Single normalization boundary shared by WebUI, Discord, and CLI."""
 
-    def __init__(self, database: Database, core: CoreService) -> None:
+    def __init__(self, database: Database, core: CoreService, delegation: DelegationService | None = None) -> None:
         self.database = database
         self.core = core
+        self.delegation = delegation
 
     def resolve_user(self, interface_type: str, external_subject: str, display_name: str = "User") -> str:
         row = self.database.fetch_one("SELECT user_id FROM interface_identities WHERE interface_type = ? AND external_subject = ?", (interface_type, external_subject))
@@ -71,6 +73,42 @@ class InterfaceService:
             {"interface": request.interface_type, "external_subject": request.external_subject},
         )
         self.database.execute("INSERT INTO interface_events(interface_type, user_id, session_id, event_type, metadata_json) VALUES (?, ?, ?, 'message', ?)", (request.interface_type, user_id, session_id, json.dumps({"request_id": response.request_id})))
+        return session_id, response
+
+    def _delegated_execution(self, role_id: str) -> dict:
+        row = self.database.fetch_one(
+            """SELECT r.id AS route_id, r.policy_json, rt.provider_id, rt.model_id
+               FROM routes r JOIN route_targets rt ON rt.route_id=r.id
+               WHERE r.role_id=? AND r.enabled=1 AND rt.enabled=1
+               ORDER BY r.priority, rt.ordinal LIMIT 1""", (role_id,)
+        )
+        if row is None:
+            raise LookupError("No delegated execution route is configured for agent")
+        try:
+            policy = json.loads(row["policy_json"] or "{}")
+        except json.JSONDecodeError:
+            policy = {}
+        execution = policy.get("delegated_execution") if isinstance(policy, dict) else None
+        if not isinstance(execution, dict) or not all(isinstance(execution.get(key), str) and execution[key] for key in ("worker_id", "environment_id")):
+            raise LookupError("Delegated execution route is incomplete")
+        return {"provider_id": row["provider_id"], "model_id": row["model_id"], "worker_id": execution["worker_id"], "environment_id": execution["environment_id"]}
+
+    async def delegate_for_session(self, request: InterfaceRequest, role_id: str, objective: str) -> tuple[str, SecretaryResponse]:
+        if self.delegation is None:
+            raise RuntimeError("Generic delegation is not configured")
+        user_id = self.resolve_user(request.interface_type, request.external_subject, request.display_name)
+        session_id = self.resolve_session(request)
+        role = self.database.fetch_one("SELECT id,enabled FROM roles WHERE id=?", (role_id,))
+        if role is None or not role["enabled"]:
+            raise LookupError("Delegated agent is unavailable")
+        selection = self._delegated_execution(role_id)
+        job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, selection["provider_id"], selection["model_id"], selection["worker_id"], selection["environment_id"], objective))
+        result = json.loads(job.get("result_json") or "{}")
+        output = result.get("output") if isinstance(result.get("output"), dict) else {}
+        content = str(output.get("final_summary") or job.get("error_summary") or job.get("result_summary") or f"Delegated job {job.get('status')}")[:1800]
+        message = self.database.fetch_one("SELECT id FROM messages WHERE session_id=? AND metadata_json LIKE ? ORDER BY created_at DESC LIMIT 1", (session_id, f'%{job["id"]}%'))
+        response = SecretaryResponse(str(uuid.uuid4()), session_id, message["id"] if message else "", content, None, selection["provider_id"], selection["model_id"], job_created=True, task_class="delegated")
+        self.database.execute("INSERT INTO interface_events(interface_type,user_id,session_id,event_type,metadata_json) VALUES (?,?,?,?,?)", (request.interface_type, user_id, session_id, "delegated_agent", json.dumps({"job_id": job["id"], "role_id": role_id})))
         return session_id, response
 
     def history(self, interface_type: str, external_subject: str, session_id: str | None = None) -> list[dict]:
