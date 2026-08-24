@@ -17,5 +17,5 @@ jobs:
     with:
       publish_image: true
       publish_release: true
-      channel: beta
+      channel: stable
     secrets: inherit
