@@ -40,6 +40,11 @@ def test_coding_tool_schema_describes_only_persisted_workspace_roots():
     inspect = next(item["function"] for item in tools if item["function"]["name"] == "inspect_file")
     assert "virtizai_core, webui" in inspect["description"]
     assert "virtizai_core, webui" in inspect["parameters"]["properties"]["path"]["description"]
+
+
+def test_coding_file_listing_can_be_withheld_when_bounded_index_is_available():
+    names = {item["function"]["name"] for item in DelegationService._agent_tools(False, ["src"], include_file_listing=False)}
+    assert names == {"inspect_file", "replace_text"}
 from virtizai_core.registries import EnvironmentRegistry, WorkerRegistry
 from virtizai_core.workers import WorkerExecutionBoundary
 
@@ -65,7 +70,7 @@ def affinity(db): return dict(db.fetch_one("SELECT affinity_provider_id,affinity
 async def test_structured_tool_and_valid_replacement_use_internal_apply_patch(tmp_path):
  db,target,b,p,svc,req=setup(tmp_path,[([inspect()],""),([replace()],""),((),"done")]);job=await svc.delegate_agent(req);data=json.loads(job["result_json"])
  names={x["function"]["name"] for x in p.calls[0][0]};tool=next(x["function"] for x in p.calls[0][0] if x["function"]["name"]=="replace_text")
- assert job["status"]=="succeeded" and target.read_text()=="after\n" and names=={"list_files","inspect_file","replace_text"} and "apply_patch" not in names
+ assert job["status"]=="succeeded" and target.read_text()=="after\n" and names=={"inspect_file","replace_text"} and "apply_patch" not in names
  assert tool["parameters"]["required"]==["path","old_text","new_text"] and [x.operation for x in b.calls]==["inspect_file","apply_patch"] and data["trace"][1]["operation"]=="replace_text"
  assert affinity(db)=={"affinity_provider_id":"sp","affinity_model_id":"sm"};db.close()
 @pytest.mark.asyncio
