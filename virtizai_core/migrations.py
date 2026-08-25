@@ -724,6 +724,51 @@ def migration_17(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_jobs_worker_status ON jobs(worker_id, status)")
 
 
+def migration_18(connection: sqlite3.Connection) -> None:
+    """Add bounded, durable project-lead milestone orchestration."""
+    connection.execute(
+        "INSERT INTO roles(id, name, purpose, requirements_json) VALUES "
+        "('role-project-lead', 'project-lead', 'Bounded multi-step project planning and review', "
+        "'{\"project_orchestration\":true}') ON CONFLICT(id) DO NOTHING"
+    )
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
+    additions = {
+        "originating_session_id": "TEXT REFERENCES sessions(id)",
+        "lead_role_id": "TEXT REFERENCES roles(id)",
+        "lead_provider_id": "TEXT REFERENCES providers(id)",
+        "lead_model_id": "TEXT REFERENCES models(id)",
+        "current_milestone_ordinal": "INTEGER",
+        "lead_inference_count": "INTEGER NOT NULL DEFAULT 0",
+        "completion_summary": "TEXT",
+        "blocker_summary": "TEXT",
+    }
+    for name, definition in additions.items():
+        if name not in columns:
+            connection.execute(f"ALTER TABLE projects ADD COLUMN {name} {definition}")
+    connection.executescript("""
+        CREATE TABLE IF NOT EXISTS project_milestones (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            specialist_role_id TEXT NOT NULL REFERENCES roles(id),
+            status TEXT NOT NULL DEFAULT 'pending',
+            job_id TEXT REFERENCES jobs(id),
+            acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+            revision_count INTEGER NOT NULL DEFAULT 0,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            result_summary TEXT,
+            blocker_summary TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(project_id, ordinal)
+        );
+        CREATE INDEX IF NOT EXISTS idx_project_milestones_project_status
+            ON project_milestones(project_id, status, ordinal);
+    """)
+
+
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -742,6 +787,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (15, migration_15),
     (16, migration_16),
     (17, migration_17),
+    (18, migration_18),
 )
 
 

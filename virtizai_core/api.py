@@ -743,7 +743,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         result = dict(project)
         result["sessions"] = [dict(row) for row in database.fetch_all("SELECT id,user_id,title,status,updated_at FROM sessions WHERE project_id=? ORDER BY updated_at DESC", (project_id,))]
         result["environments"] = [dict(row) for row in database.fetch_all("SELECT e.*, pe.relationship FROM environment_targets e JOIN project_environment_targets pe ON pe.environment_target_id=e.id WHERE pe.project_id=? ORDER BY e.name", (project_id,))]
-        result["jobs"] = [dict(row) for row in database.fetch_all("SELECT j.id,j.kind,j.status,j.session_id,j.created_at,j.finished_at FROM jobs j JOIN sessions s ON s.id=j.session_id WHERE s.project_id=? ORDER BY j.created_at DESC", (project_id,))]
+        result["jobs"] = [dict(row) for row in database.fetch_all("SELECT id,kind,status,session_id,project_id,role_id,created_at,finished_at FROM jobs WHERE project_id=? ORDER BY created_at DESC", (project_id,))]
+        result["milestones"] = [dict(row) for row in database.fetch_all("SELECT * FROM project_milestones WHERE project_id=? ORDER BY ordinal", (project_id,))]
         return result
 
     @app.patch("/v1/projects/{project_id}")

@@ -36,6 +36,8 @@ async def test_discord_explicit_trigger_calls_generic_interface_role(tmp_path):
 def test_hybrid_deterministic_rules_are_conservative(tmp_path):
  db,_,_=setup(tmp_path);policy=DelegationPolicyEngine(db)
  assert policy.deterministic('/coding inspect README.md').role_id=='role-coding'
+ assert policy.deterministic('/project plan an implementation and validation project').role_id=='role-project-lead'
+ assert policy.deterministic('Plan a multi-step feature implementation and validation').role_id=='role-project-lead'
  assert policy.deterministic('Fix the source file parser').role_id=='role-coding'
  assert policy.deterministic('Explain this architecture') is None
  assert policy.deterministic('What is Python?') is None

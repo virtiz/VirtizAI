@@ -9,6 +9,7 @@ from .services import CoreService, SecretaryResponse
 from .orchestration import AgentWorkRequest, DelegationService
 from .policy import CommunicationPolicy, normalize_policy
 from .delegation_policy import DelegationPolicyEngine
+from .project_lead import ProjectLeadService
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class InterfaceService:
         self.core = core
         self.delegation = delegation
         self.delegation_policy = DelegationPolicyEngine(database, getattr(core, "providers", None), getattr(core, "_secretary_candidates", None))
+        self.project_lead = ProjectLeadService(database, getattr(core, "providers", None), delegation, self._delegated_execution) if delegation is not None else None
 
     def resolve_user(self, interface_type: str, external_subject: str, display_name: str = "User") -> str:
         row = self.database.fetch_one("SELECT user_id FROM interface_identities WHERE interface_type = ? AND external_subject = ?", (interface_type, external_subject))
@@ -71,7 +73,10 @@ class InterfaceService:
         policy = normalize_policy(request.response_verbosity, request.execution_updates, request.tool_details, CommunicationPolicy(**inherited) if inherited else None)
         decision = await self.delegation_policy.decide(request.content)
         if decision.decision == "delegate" and self.delegation is not None:
-            session_id, response = await self.delegate_for_session(request, decision.role_id or "", decision.objective)
+            if decision.role_id == "role-project-lead":
+                session_id, response = await self.project_for_session(request, decision.objective)
+            else:
+                session_id, response = await self.delegate_for_session(request, decision.role_id or "", decision.objective)
             self.database.execute("INSERT INTO interface_events(interface_type,user_id,session_id,event_type,metadata_json) VALUES (?,?,?,?,?)", (request.interface_type, user_id, session_id, "delegation_decision", json.dumps(decision.metadata())))
             return session_id, response
         response = await self.core.handle_message(
@@ -117,6 +122,31 @@ class InterfaceService:
         response = SecretaryResponse(str(uuid.uuid4()), session_id, message["id"] if message else "", content, None, selection["provider_id"], selection["model_id"], job_created=True, task_class="delegated")
         self.database.execute("INSERT INTO interface_events(interface_type,user_id,session_id,event_type,metadata_json) VALUES (?,?,?,?,?)", (request.interface_type, user_id, session_id, "delegated_agent", json.dumps({"job_id": job["id"], "role_id": role_id})))
         return session_id, response
+
+    async def project_for_session(self, request: InterfaceRequest, objective: str) -> tuple[str, SecretaryResponse]:
+        if self.project_lead is None:
+            raise RuntimeError("Project Lead orchestration is not configured")
+        user_id = self.resolve_user(request.interface_type, request.external_subject, request.display_name)
+        session_id = self.resolve_session(request)
+        role = self.database.fetch_one("SELECT id,enabled FROM roles WHERE id='role-project-lead'")
+        if role is None or not role["enabled"]:
+            raise LookupError("Project Lead agent is unavailable")
+        selection = self._lead_execution("role-project-lead")
+        project = await self.project_lead.run(session_id, objective, selection)
+        status = project.get("status")
+        content = str(project.get("completion_summary") or project.get("blocker_summary") or f"Project {status}")[:1800]
+        self.core.sessions.add_message(session_id, "assistant", content, {"execution_type": "project_lead", "project_id": project["id"], "role_id": "role-project-lead", "status": status})
+        message = self.database.fetch_one("SELECT id FROM messages WHERE session_id=? AND metadata_json LIKE ? ORDER BY created_at DESC LIMIT 1", (session_id, f'%{project["id"]}%'))
+        response = SecretaryResponse(str(uuid.uuid4()), session_id, message["id"] if message else "", content, None, selection["provider_id"], selection["model_id"], job_created=True, task_class="project")
+        self.database.execute("INSERT INTO interface_events(interface_type,user_id,session_id,event_type,metadata_json) VALUES (?,?,?,?,?)", (request.interface_type, user_id, session_id, "project_result", json.dumps({"project_id": project["id"], "status": status, "lead_role_id": "role-project-lead"})))
+        return session_id, response
+
+    def _lead_execution(self, role_id: str) -> dict:
+        row = self.database.fetch_one("""SELECT rt.provider_id,rt.model_id FROM routes r JOIN route_targets rt ON rt.route_id=r.id
+            WHERE r.role_id=? AND r.enabled=1 AND rt.enabled=1 ORDER BY r.priority,rt.ordinal LIMIT 1""", (role_id,))
+        if row is None:
+            raise LookupError("No Project Lead route is configured")
+        return {"provider_id": row["provider_id"], "model_id": row["model_id"]}
 
     def history(self, interface_type: str, external_subject: str, session_id: str | None = None) -> list[dict]:
         user_id = self.resolve_user(interface_type, external_subject)

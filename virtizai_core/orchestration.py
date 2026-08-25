@@ -54,6 +54,7 @@ class AgentWorkRequest:
     worker_id: str
     environment_id: str
     objective: str
+    project_id: str | None = None
     context: dict[str, Any] = field(default_factory=dict)
     timeout_seconds: float | None = None
 
@@ -268,7 +269,7 @@ class DelegationService:
         session = self._validate(request)
         job_id = self.jobs.create_delegated(
             kind="delegated_agent", payload={"objective": request.objective, "context": request.context},
-            user_id=session["user_id"], session_id=request.session_id, project_id=None,
+            user_id=session["user_id"], session_id=request.session_id, project_id=request.project_id,
             role_id=request.role_id, provider_id=request.provider_id, model_id=request.model_id,
             worker_id=request.worker_id, environment_target_id=request.environment_id, objective=request.objective,
         )
