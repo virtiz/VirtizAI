@@ -22,6 +22,7 @@ class DevelopmentToolsExecutor:
         "pytest": (sys.executable, "-m", "pytest", "-q"),
         "packet5": (sys.executable, "-m", "pytest", "-q", "tests/test_job_orchestration.py"),
     }
+    test_timeouts = {"pytest": 90.0, "packet5": 30.0}
 
     @staticmethod
     def _config(environment: dict) -> dict[str, Any]:
@@ -193,7 +194,7 @@ class DevelopmentToolsExecutor:
         command = self.test_targets.get(target)
         if command is None:
             return ExecutionResult("failed", error_summary="Unsupported test target")
-        timeout = request.timeout_seconds if request.timeout_seconds is not None else 30.0
+        timeout = request.timeout_seconds if request.timeout_seconds is not None else self.test_timeouts[target]
         if not isinstance(timeout, (int, float)) or timeout <= 0 or timeout > 120:
             return ExecutionResult("failed", error_summary="Invalid test timeout")
         started = time.perf_counter()

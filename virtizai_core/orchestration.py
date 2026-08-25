@@ -166,14 +166,16 @@ class DelegationService:
         return cls._validate_agent_action(action)
 
     @staticmethod
-    def _agent_tools() -> list[dict[str, Any]]:
+    def _agent_tools(include_tests: bool = True) -> list[dict[str, Any]]:
         def function(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
             return {"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}
-        return [
+        tools = [
             function("inspect_file", "Inspect a bounded text file inside the configured workspace.", {"type": "object", "additionalProperties": False, "required": ["path"], "properties": {"path": {"type": "string"}, "start_line": {"type": "integer", "minimum": 1}, "end_line": {"type": "integer", "minimum": 1}, "max_lines": {"type": "integer", "minimum": 1, "maximum": 200}}}),
-            function("run_tests", "Run one allowlisted test target.", {"type": "object", "additionalProperties": False, "required": ["target"], "properties": {"target": {"type": "string", "enum": ["pytest", "packet5"]}}}),
             function("replace_text", "Replace one exact occurrence in an already-inspected existing file. The platform constructs and validates the unified patch.", {"type": "object", "additionalProperties": False, "required": ["path", "old_text", "new_text"], "properties": {"path": {"type": "string", "description": "Inspected workspace-relative existing file path."}, "old_text": {"type": "string", "description": "Exact text from the inspected file; it must occur exactly once.", "maxLength": 4000}, "new_text": {"type": "string", "description": "Exact bounded replacement text; no diff syntax.", "maxLength": 4000}}}),
         ]
+        if include_tests:
+            tools.insert(1, function("run_tests", "Run one allowlisted test target after inspecting the relevant implementation.", {"type": "object", "additionalProperties": False, "required": ["target"], "properties": {"target": {"type": "string", "enum": ["pytest", "packet5"]}}}))
+        return tools
 
     def _infrastructure_tools(self, environment_id: str, worker_id: str | None = None) -> list[dict[str, Any]]:
         def fn(name: str, required: list[str], props: dict[str, Any]) -> dict[str, Any]:
@@ -335,7 +337,7 @@ class DelegationService:
             if model is None:
                 raise DelegationError("Delegated model not found for provider")
             for step in range(1, 4):
-                inference = await self.providers.chat(request.provider_id, model["name"], messages, max_tokens=256, tools=self._infrastructure_tools(request.environment_id, request.worker_id) if infrastructure else self._agent_tools(), tool_choice="auto")
+                inference = await self.providers.chat(request.provider_id, model["name"], messages, max_tokens=256, tools=self._infrastructure_tools(request.environment_id, request.worker_id) if infrastructure else self._agent_tools(include_tests=bool(inspected)), tool_choice="auto")
                 if not inference.tool_calls:
                     if not trace:
                         raise DelegationError("Coding Agent returned no tool call")
