@@ -10,6 +10,7 @@ from .orchestration import AgentWorkRequest, DelegationService
 from .policy import CommunicationPolicy, normalize_policy
 from .delegation_policy import DelegationPolicyEngine
 from .project_lead import ProjectLeadService
+from .routing import RoutingEngine
 
 
 @dataclass(frozen=True)
@@ -88,12 +89,10 @@ class InterfaceService:
         return session_id, response
 
     def _delegated_execution(self, role_id: str) -> dict:
-        row = self.database.fetch_one(
-            """SELECT r.id AS route_id, r.policy_json, rt.provider_id, rt.model_id
-               FROM routes r JOIN route_targets rt ON rt.route_id=r.id
-               WHERE r.role_id=? AND r.enabled=1 AND rt.enabled=1
-               ORDER BY r.priority, rt.ordinal LIMIT 1""", (role_id,)
-        )
+        decision = RoutingEngine(self.database).capability_selection(role_id)
+        selected = decision.get("selected")
+        if selected is None: raise LookupError("No capability-eligible delegated execution target is configured")
+        row = self.database.fetch_one("SELECT policy_json FROM routes WHERE id=?", (selected["route_id"],))
         if row is None:
             raise LookupError("No delegated execution route is configured for agent")
         try:
@@ -103,7 +102,7 @@ class InterfaceService:
         execution = policy.get("delegated_execution") if isinstance(policy, dict) else None
         if not isinstance(execution, dict) or not all(isinstance(execution.get(key), str) and execution[key] for key in ("worker_id", "environment_id")):
             raise LookupError("Delegated execution route is incomplete")
-        return {"provider_id": row["provider_id"], "model_id": row["model_id"], "worker_id": execution["worker_id"], "environment_id": execution["environment_id"]}
+        return {"provider_id": selected["provider_id"], "model_id": selected["model_id"], "worker_id": execution["worker_id"], "environment_id": execution["environment_id"], "routing_decision": decision}
 
     async def delegate_for_session(self, request: InterfaceRequest, role_id: str, objective: str) -> tuple[str, SecretaryResponse]:
         if self.delegation is None:
@@ -114,7 +113,7 @@ class InterfaceService:
         if role is None or not role["enabled"]:
             raise LookupError("Delegated agent is unavailable")
         selection = self._delegated_execution(role_id)
-        job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, selection["provider_id"], selection["model_id"], selection["worker_id"], selection["environment_id"], objective))
+        job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, selection["provider_id"], selection["model_id"], selection["worker_id"], selection["environment_id"], objective, context={"routing_decision": selection["routing_decision"]}))
         result = json.loads(job.get("result_json") or "{}")
         output = result.get("output") if isinstance(result.get("output"), dict) else {}
         content = str(output.get("final_summary") or job.get("error_summary") or job.get("result_summary") or f"Delegated job {job.get('status')}")[:1800]
@@ -142,11 +141,11 @@ class InterfaceService:
         return session_id, response
 
     def _lead_execution(self, role_id: str) -> dict:
-        row = self.database.fetch_one("""SELECT rt.provider_id,rt.model_id FROM routes r JOIN route_targets rt ON rt.route_id=r.id
-            WHERE r.role_id=? AND r.enabled=1 AND rt.enabled=1 ORDER BY r.priority,rt.ordinal LIMIT 1""", (role_id,))
+        decision = RoutingEngine(self.database).capability_selection(role_id)
+        row = decision.get("selected")
         if row is None:
             raise LookupError("No Project Lead route is configured")
-        return {"provider_id": row["provider_id"], "model_id": row["model_id"]}
+        return {"provider_id": row["provider_id"], "model_id": row["model_id"], "routing_decision": decision}
 
     def history(self, interface_type: str, external_subject: str, session_id: str | None = None) -> list[dict]:
         user_id = self.resolve_user(interface_type, external_subject)

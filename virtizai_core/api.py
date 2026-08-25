@@ -121,6 +121,7 @@ class RouteCreate(BaseModel):
     priority: int = 100
     targets: list[dict] = Field(default_factory=list)
     delegated_execution: DelegatedExecutionConfig | None = None
+    capability_policy: dict | None = None
 
 
 class RouteUpdate(BaseModel):
@@ -129,6 +130,7 @@ class RouteUpdate(BaseModel):
     priority: int = 100
     targets: list[dict] = Field(default_factory=list)
     delegated_execution: DelegatedExecutionConfig | None = None
+    capability_policy: dict | None = None
 
 
 class RouteTargetCreate(BaseModel):
@@ -926,6 +928,14 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         providers.set_model_override(model_id, current)
         return {"model_id": model_id, "overrides": current}
 
+    @app.get("/v1/models/{model_id}/capabilities")
+    async def model_capabilities(model_id: str) -> dict:
+        row = database.fetch_one("SELECT id,capabilities_json,user_overrides_json FROM models WHERE id=?", (model_id,))
+        if row is None: raise HTTPException(status_code=404, detail="Model not found")
+        from .capability_routing import capability_state
+        names = ("chat", "native_tool_calls", "structured_output", "reasoning", "coding", "long_context", "local", "remote")
+        return {"model_id": row["id"], "capabilities": {name: capability_state(dict(row), name) for name in names}}
+
     @app.get("/v1/models/{model_id}/residency")
     async def model_residency(model_id: str) -> dict:
         row = database.fetch_one("SELECT m.id,m.name,m.provider_id,m.status,m.user_overrides_json,p.name provider_name FROM models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?", (model_id,))
@@ -953,7 +963,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         database.execute("INSERT INTO roles(id, name, purpose, requirements_json) VALUES (?, ?, ?, ?)", (role_id, request.name, request.purpose, json.dumps(request.requirements)))
         return {"id": role_id, "name": request.name, "purpose": request.purpose}
 
-    def route_policy(strategy: str, delegated_execution: DelegatedExecutionConfig | None, existing_policy: dict | None = None) -> dict:
+    def route_policy(strategy: str, delegated_execution: DelegatedExecutionConfig | None, capability_policy: dict | None = None, existing_policy: dict | None = None) -> dict:
         policy = dict(existing_policy) if isinstance(existing_policy, dict) else {}
         policy["strategy"] = strategy
         if delegated_execution is not None:
@@ -966,6 +976,8 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
             policy["delegated_execution"] = delegated_execution.model_dump()
         else:
             policy.pop("delegated_execution", None)
+        if capability_policy is not None:
+            policy["capability_routing"] = capability_policy
         return policy
 
     @app.get("/v1/routes")
@@ -993,7 +1005,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     @app.post("/v1/routes")
     async def create_route(request: RouteCreate) -> dict:
         role = require_enabled_role(request.role_id)
-        policy = route_policy(request.strategy, request.delegated_execution)
+        policy = route_policy(request.strategy, request.delegated_execution, request.capability_policy)
         route_id = str(uuid.uuid4())
         database.execute("INSERT INTO routes(id, name, role_id, priority, policy_json) VALUES (?, ?, ?, ?, ?)", (route_id, request.name, request.role_id, request.priority, json.dumps(policy)))
         for target in request.targets:
@@ -1014,7 +1026,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         execution = request.delegated_execution if "delegated_execution" in request.model_fields_set else existing_policy.get("delegated_execution")
         if isinstance(execution, dict):
             execution = DelegatedExecutionConfig.model_validate(execution)
-        policy = route_policy(request.strategy, execution, existing_policy)
+        policy = route_policy(request.strategy, execution, request.capability_policy, existing_policy)
         database.execute("UPDATE routes SET role_id = ?, priority = ?, policy_json = ? WHERE id = ?", (role_id, request.priority, json.dumps(policy), route_id))
         database.execute("DELETE FROM route_targets WHERE route_id = ?", (route_id,))
         for target in request.targets:

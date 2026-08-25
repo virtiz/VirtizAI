@@ -8,6 +8,7 @@ from virtizai_core.db import Database
 from virtizai_core.health import HealthManager
 from virtizai_core.providers import ProviderRegistry
 from virtizai_core.routing import RoutingEngine
+from virtizai_core.capability_routing import requirements_for
 
 
 async def setup_provider(database: Database, name: str, fail: bool = False) -> tuple[str, str]:
@@ -91,3 +92,16 @@ async def test_mock_inference_returns_real_metadata(tmp_path: Path) -> None:
     assert result.total_tokens == 8
     assert result.usage_exact is True
     database.close()
+
+
+def test_capability_routing_filters_and_ranks_deterministically(tmp_path: Path) -> None:
+    db=Database(tmp_path/'cap.db');db.open()
+    db.execute("INSERT INTO providers(id,name,adapter_type,health_status) VALUES('p1','P1','mock','healthy'),('p2','P2','mock','healthy'),('p3','P3','mock','unavailable')")
+    evidence='{"capability_evidence":{"chat":"verified","native_tool_calls":"verified","coding":"verified"}}'
+    db.execute("INSERT INTO models(id,provider_id,name,status,locality,relative_cost,user_overrides_json) VALUES('m1','p1','one','available','remote',1,?),('m2','p2','two','available','local',2,?),('m3','p3','three','available','local',0,?)",(evidence,evidence,evidence))
+    db.execute("INSERT INTO routes(id,name,role_id,priority,policy_json) VALUES('r','R','role-coding',10,'{\"capability_routing\":{\"enforce\":true}}')")
+    for ordinal,provider,model in [(0,'p1','m1'),(1,'p2','m2'),(2,'p3','m3')]: db.execute("INSERT INTO route_targets(route_id,provider_id,model_id,ordinal) VALUES('r',?,?,?)",(provider,model,ordinal))
+    decision=RoutingEngine(db).capability_selection('role-coding',requirements_for('role-coding'))
+    assert decision['selected']['model_id']=='m2' and any(x['reason']=='provider_unhealthy' for x in decision['excluded']) and len(decision['fallback_candidates'])==1
+    db.execute("UPDATE models SET user_overrides_json='{}' WHERE id='m2'")
+    decision=RoutingEngine(db).capability_selection('role-coding');assert decision['selected']['model_id']=='m1';assert any(x['model_id']=='m2' and x['reason']=='capability_missing' for x in decision['excluded']);db.close()

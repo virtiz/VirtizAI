@@ -144,7 +144,7 @@ class ProjectLeadService:
                     if active >= self.limits.max_active_children:
                         raise ProjectLeadError("Project already has an active child job")
                     self.database.execute("UPDATE project_milestones SET status='running',updated_at=CURRENT_TIMESTAMP WHERE id=?", (milestone["id"],))
-                    child = await self.delegation.delegate_agent(AgentWorkRequest(session_id, milestone["specialist_role_id"], coding["provider_id"], coding["model_id"], coding["worker_id"], coding["environment_id"], current_objective, project_id=project_id))
+                    child = await self.delegation.delegate_agent(AgentWorkRequest(session_id, milestone["specialist_role_id"], coding["provider_id"], coding["model_id"], coding["worker_id"], coding["environment_id"], current_objective, project_id=project_id, context={"routing_decision": coding.get("routing_decision", {})}))
                     evidence = self._evidence(child)
                     self.database.execute("UPDATE project_milestones SET job_id=?, evidence_json=?, result_summary=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (child["id"], json.dumps(evidence)[:self.limits.max_evidence_bytes], evidence["summary"], "reviewing" if child.get("status") == "succeeded" else "failed", milestone["id"]))
                     if child.get("status") != "succeeded":
