@@ -32,6 +32,19 @@ async def test_inspect_file_is_bounded_and_uses_boundary(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_list_files_is_bounded_to_persisted_allowed_roots(tmp_path: Path):
+    database, workspace, worker_id, environment_id, boundary = setup(tmp_path)
+    (workspace / "src").mkdir(); (workspace / "src" / "sample.py").write_text("x")
+    (workspace / "tests").mkdir(); (workspace / "tests" / "test_sample.py").write_text("x")
+    (workspace / "outside.py").write_text("x")
+    result = await boundary.execute(ExecutionRequest(worker_id, environment_id, "list_files", {}))
+    assert result.status == "succeeded" and result.output["files"] == ["src/sample.py", "tests/test_sample.py"]
+    rejected = await boundary.execute(ExecutionRequest(worker_id, environment_id, "list_files", {"path": "src"}))
+    assert rejected.status == "failed" and rejected.error_summary == "list_files does not accept arguments"
+    database.close()
+
+
+@pytest.mark.asyncio
 async def test_inspect_file_rejects_escape_and_missing_files(tmp_path: Path):
     database, _, worker_id, environment_id, boundary = setup(tmp_path)
     for path, expected in (("../secret", "Invalid file path"), ("/etc/passwd", "Invalid file path"), ("src/missing.py", "File not found")):

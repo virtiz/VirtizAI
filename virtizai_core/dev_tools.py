@@ -44,6 +44,8 @@ class DevelopmentToolsExecutor:
             return None
 
     async def execute(self, request: ExecutionRequest, worker: dict, environment: dict) -> ExecutionResult:
+        if request.operation == "list_files":
+            return self._list_files(request, environment)
         if request.operation == "inspect_file":
             return self._inspect_file(request, environment)
         if request.operation == "run_tests":
@@ -51,6 +53,33 @@ class DevelopmentToolsExecutor:
         if request.operation == "apply_patch":
             return self._apply_patch(request, environment)
         return ExecutionResult("failed", error_summary="Unsupported development operation")
+
+    def _list_files(self, request: ExecutionRequest, environment: dict) -> ExecutionResult:
+        if request.payload:
+            return ExecutionResult("failed", error_summary="list_files does not accept arguments")
+        workspace = self._workspace(environment)
+        if workspace is None or not workspace.is_dir():
+            return ExecutionResult("failed", error_summary="Environment workspace is unavailable")
+        allowed_roots = self._config(environment).get("allowed_roots", ["."])
+        if not isinstance(allowed_roots, list) or not all(isinstance(root, str) for root in allowed_roots):
+            return ExecutionResult("failed", error_summary="Environment allowed roots are invalid")
+        files: list[str] = []
+        try:
+            for raw_root in allowed_roots[:8]:
+                root = (workspace / raw_root).resolve()
+                if workspace not in root.parents and root != workspace:
+                    return ExecutionResult("failed", error_summary="Environment allowed roots are invalid")
+                candidates = [root] if root.is_file() else root.rglob("*") if root.is_dir() else []
+                for candidate in candidates:
+                    if candidate.is_file() and not candidate.name.startswith("."):
+                        files.append(str(candidate.relative_to(workspace)))
+                        if len(files) >= 80:
+                            break
+                if len(files) >= 80:
+                    break
+        except OSError:
+            return ExecutionResult("failed", error_summary="Workspace file listing failed")
+        return ExecutionResult("succeeded", {"files": sorted(files)[:80], "truncated": len(files) >= 80})
 
     def _inspect_file(self, request: ExecutionRequest, environment: dict) -> ExecutionResult:
         workspace = self._workspace(environment)

@@ -31,7 +31,7 @@ def test_infrastructure_mutation_tool_visibility_requires_persisted_policy(tmp_p
 
 
 def test_coding_tests_are_not_offered_before_inspection():
-    assert {item["function"]["name"] for item in DelegationService._agent_tools(False)} == {"inspect_file", "replace_text"}
+    assert {item["function"]["name"] for item in DelegationService._agent_tools(False)} == {"list_files", "inspect_file", "replace_text"}
     assert "run_tests" in {item["function"]["name"] for item in DelegationService._agent_tools(True)}
 
 
@@ -65,7 +65,7 @@ def affinity(db): return dict(db.fetch_one("SELECT affinity_provider_id,affinity
 async def test_structured_tool_and_valid_replacement_use_internal_apply_patch(tmp_path):
  db,target,b,p,svc,req=setup(tmp_path,[([inspect()],""),([replace()],""),((),"done")]);job=await svc.delegate_agent(req);data=json.loads(job["result_json"])
  names={x["function"]["name"] for x in p.calls[0][0]};tool=next(x["function"] for x in p.calls[0][0] if x["function"]["name"]=="replace_text")
- assert job["status"]=="succeeded" and target.read_text()=="after\n" and names=={"inspect_file","replace_text"} and "apply_patch" not in names
+ assert job["status"]=="succeeded" and target.read_text()=="after\n" and names=={"list_files","inspect_file","replace_text"} and "apply_patch" not in names
  assert tool["parameters"]["required"]==["path","old_text","new_text"] and [x.operation for x in b.calls]==["inspect_file","apply_patch"] and data["trace"][1]["operation"]=="replace_text"
  assert affinity(db)=={"affinity_provider_id":"sp","affinity_model_id":"sm"};db.close()
 @pytest.mark.asyncio
@@ -87,6 +87,13 @@ async def test_missing_inspection_is_bounded_feedback_then_model_can_recover(tmp
  assert [item["status"] for item in data["trace"]]==["failed","succeeded"]
  assert any("File not found" in str(message.get("content", "")) for message in p.calls[1][2] if isinstance(message,dict))
  assert affinity(db)=={"affinity_provider_id":"sp","affinity_model_id":"sm"};db.close()
+
+@pytest.mark.asyncio
+async def test_list_files_is_typed_and_bounded_before_file_selection(tmp_path):
+ db,target,b,p,svc,req=setup(tmp_path,[([call("list_files",{})],""),([inspect()],""),((),"done")])
+ job=await svc.delegate_agent(req); data=json.loads(job["result_json"])
+ assert job["status"]=="succeeded" and [item.operation for item in b.calls]==["list_files","inspect_file"]
+ assert data["trace"][0]["operation"]=="list_files" and affinity(db)=={"affinity_provider_id":"sp","affinity_model_id":"sm"};db.close()
 @pytest.mark.asyncio
 async def test_provider_and_worker_failures_preserve_affinity(tmp_path):
  db,target,b,p,svc,req=setup(tmp_path,[([inspect()],""),RuntimeError("x")]);job=await svc.delegate_agent(req);assert job["status"]=="failed" and affinity(db)=={"affinity_provider_id":"sp","affinity_model_id":"sm"};db.close()
