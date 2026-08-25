@@ -305,7 +305,10 @@ class DelegationService:
             feedback = {key: output.get(key) for key in ("target", "exit_code", "stdout_truncated", "stderr_truncated")}
             feedback["stdout"] = str(output.get("stdout", ""))[:1000]
             feedback["stderr"] = str(output.get("stderr", ""))[:1000]
-        return json.dumps({"operation": operation, "status": result.status, "result": feedback}, separators=(",", ":"))[:5000]
+        payload = {"operation": operation, "status": result.status, "result": feedback}
+        if result.status != "succeeded" and result.error_summary:
+            payload["error"] = result.error_summary[:300]
+        return json.dumps(payload, separators=(",", ":"))[:5000]
 
     async def delegate_agent(self, request: AgentWorkRequest) -> dict:
         """Run at most three native tool-call cycles within one durable delegated Job."""
@@ -366,6 +369,23 @@ class DelegationService:
                               "risk_class": evidence.get("risk_class"), "authorization_source": evidence.get("authorization_source"),
                               "adapter": evidence.get("adapter"), "resource_id": str(evidence.get("resource_id", payload.get("vm_id", "")))[:120]})
                 if execution.status != "succeeded":
+                    # A bounded inspection miss is recoverable: the model can
+                    # select another workspace-relative file on its next turn.
+                    # Keep mutations, tests, infrastructure actions, and an
+                    # exhausted tool budget terminal.
+                    recoverable_inspection_miss = (
+                        not infrastructure
+                        and selected_operation == "inspect_file"
+                        and execution.error_summary in {"File not found", "Invalid file path", "File path is outside allowed roots"}
+                        and step < 3
+                    )
+                    if recoverable_inspection_miss:
+                        call = inference.tool_calls[0]
+                        messages.extend([
+                            {"role": "assistant", "content": inference.content, "tool_calls": [call]},
+                            {"role": "tool", "tool_call_id": call.get("id", ""), "content": self._tool_feedback(selected_operation, execution)},
+                        ])
+                        continue
                     result = execution
                     break
                 if selected_operation == "inspect_file":

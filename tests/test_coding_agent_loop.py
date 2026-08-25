@@ -71,6 +71,15 @@ async def test_mutation_rejections_are_safe_and_bounded(tmp_path,intent,code):
 async def test_path_not_inspected_and_one_mutation_limit(tmp_path):
  db,target,b,p,svc,req=setup(tmp_path,[([replace()],"")]);job=await svc.delegate_agent(req);assert json.loads(job["result_json"])["rejection_diagnostic"]["rejection_code"]=="mutation_path_not_inspected" and not b.calls;db.close()
  db,target,b,p,svc,req=setup(tmp_path/"two",[([inspect()],""),([replace()],""),([replace("after","again")],"")]);job=await svc.delegate_agent(req);assert job["status"]=="failed" and job["error_summary"]=="Coding Agent exceeded mutation limit" and target.read_text()=="after\n";db.close()
+
+@pytest.mark.asyncio
+async def test_missing_inspection_is_bounded_feedback_then_model_can_recover(tmp_path):
+ db,target,b,p,svc,req=setup(tmp_path,[([call("inspect_file",{"path":"src/missing.txt"})],""),([inspect()],""),((),"inspected the available file")])
+ job=await svc.delegate_agent(req); data=json.loads(job["result_json"])
+ assert job["status"]=="succeeded" and [item.operation for item in b.calls]==["inspect_file","inspect_file"]
+ assert [item["status"] for item in data["trace"]]==["failed","succeeded"]
+ assert any("File not found" in str(message.get("content", "")) for message in p.calls[1][2] if isinstance(message,dict))
+ assert affinity(db)=={"affinity_provider_id":"sp","affinity_model_id":"sm"};db.close()
 @pytest.mark.asyncio
 async def test_provider_and_worker_failures_preserve_affinity(tmp_path):
  db,target,b,p,svc,req=setup(tmp_path,[([inspect()],""),RuntimeError("x")]);job=await svc.delegate_agent(req);assert job["status"]=="failed" and affinity(db)=={"affinity_provider_id":"sp","affinity_model_id":"sm"};db.close()
