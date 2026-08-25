@@ -35,6 +35,19 @@ class InfrastructureToolsExecutor:
     def _normalize_vm(item: dict) -> dict[str, Any]:
         return {"id":str(item.get("vmid")),"name":str(item.get("name", ""))[:160],"state":item.get("status"),"host":item.get("node"),"resource_type":"vm","cpu":item.get("maxcpu"),"memory":item.get("maxmem")}
 
+    def _proxmox_vms(self, endpoint: str, token_id: str, token: str, config: dict, allowed: list[str]) -> list[dict[str, Any]]:
+        node = config.get("proxmox_node")
+        if isinstance(node, str) and node:
+            safe_node = urllib.parse.quote(node, safe="")
+            values = []
+            for vm_id in allowed:
+                data = self._request(endpoint, token_id, token, f"/api2/json/nodes/{safe_node}/qemu/{urllib.parse.quote(vm_id, safe='')}/status/current")
+                if isinstance(data, dict):
+                    values.append(self._normalize_vm({**data, "vmid": vm_id, "node": node}))
+            return values
+        data = self._request(endpoint, token_id, token, "/api2/json/cluster/resources?type=vm")
+        return [self._normalize_vm(item) for item in (data if isinstance(data, list) else []) if isinstance(item, dict) and str(item.get("vmid")) in allowed][:50]
+
     def _proxmox(self, request: ExecutionRequest, environment: dict, config: dict) -> ExecutionResult:
         reference, endpoint = environment.get("credential_ref"), environment.get("address")
         if not isinstance(reference,str) or not reference or self.secret_store is None or not self.secret_store.configured(reference): return self._error("credential_unavailable")
@@ -42,9 +55,8 @@ class InfrastructureToolsExecutor:
         token_id = config.get("api_token_id")
         if not isinstance(token_id,str) or not token_id: return self._error("credential_unavailable")
         try:
-            token=self.secret_store.get(reference); inventory=self._request(endpoint,token_id,token,"/api2/json/cluster/resources?type=vm")
-            items=inventory if isinstance(inventory,list) else []; allowed=resource_scope(config, request.operation)
-            normalized=[self._normalize_vm(item) for item in items if isinstance(item,dict) and str(item.get("vmid")) in allowed][:50]
+            token=self.secret_store.get(reference); allowed=resource_scope(config, request.operation)
+            normalized=self._proxmox_vms(endpoint, token_id, token, config, allowed)
             if request.operation == "inspect_host":
                 host_id=request.payload.get("host_id"); data=self._request(endpoint,token_id,token,f"/api2/json/nodes/{urllib.parse.quote(str(host_id),safe='')}/status")
                 return ExecutionResult("succeeded",{"id":host_id,"platform":"proxmox","state":"online"} if isinstance(data,dict) else {},None if isinstance(data,dict) else "adapter_invalid_data")
@@ -65,8 +77,7 @@ class InfrastructureToolsExecutor:
                     completed=True; break
                 time.sleep(self.task_poll_seconds)
             if not completed: return self._error("postcondition_timeout")
-            current=self._request(endpoint,token_id,token,"/api2/json/cluster/resources?type=vm")
-            check=next((self._normalize_vm(item) for item in (current if isinstance(current,list) else []) if isinstance(item,dict) and str(item.get("vmid"))==vm_id),None)
+            check=next((item for item in self._proxmox_vms(endpoint, token_id, token, config, [vm_id]) if item["id"] == vm_id), None)
             if check is None or check.get("state")!="running": return self._error("postcondition_timeout")
             return ExecutionResult("succeeded",{"resource_id":vm_id,"operation":request.operation,"accepted":True,"task_id":task_id[:240],"pre_state":found.get("state"),"state":check.get("state"),"host":check.get("host"),"outcome":"verified"})
         except Exception: return self._error("backend_operation_failed")

@@ -32,6 +32,8 @@ class DelegationPolicyEngine:
             return DelegationDecision("delegate", "role-project-lead", 1.0, "explicit_project", "explicit-user", text[9:].strip())
         if text.startswith("/coding ") and text[8:].strip():
             return DelegationDecision("delegate", "role-coding", 1.0, "explicit_coding", "explicit-user", text[8:].strip())
+        if re.search(r"\b(start|restart)\b.*\b(vm|virtual machine|test vm)\b", lowered):
+            return DelegationDecision("delegate", "role-infrastructure", 1.0, "bounded_infrastructure_mutation", "deterministic", text)
         if re.search(r"\b(what|show|inspect|list|is)\b.*\b(vm|vms|container|containers|service|services|host|hosts)\b", lowered) and not re.search(r"\b(what is|explain|architecture)\b", lowered):
             return DelegationDecision("delegate", "role-infrastructure", 1.0, "bounded_infrastructure_read", "deterministic", text)
         multi_step = re.search(r"\b(plan|manage|milestone|multi-step|multiple files|end-to-end|implementation and validation)\b", lowered)
