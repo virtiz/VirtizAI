@@ -13,13 +13,15 @@ class TaskRequirements:
     prefer_local: bool = False
     latency_preference: str = "balanced"
     cost_preference: str = "balanced"
+    execution_capabilities: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
-        return {"required_capabilities": list(self.required_capabilities), "preferred_capabilities": list(self.preferred_capabilities), "prefer_local": self.prefer_local, "latency_preference": self.latency_preference, "cost_preference": self.cost_preference}
+        return {"required_capabilities": list(self.required_capabilities), "preferred_capabilities": list(self.preferred_capabilities), "execution_capabilities_any": list(self.execution_capabilities), "prefer_local": self.prefer_local, "latency_preference": self.latency_preference, "cost_preference": self.cost_preference}
 
 ROLE_REQUIREMENTS = {
     "role-secretary": TaskRequirements(("chat",)),
-    "role-coding": TaskRequirements(("chat", "native_tool_calls", "coding"), ("local",), True),
+    # Coding may use either a native-tool model or a bounded managed worker.
+    "role-coding": TaskRequirements(("coding",), ("local",), True, execution_capabilities=("native_tool_calls", "managed_coding_worker")),
     "role-infrastructure": TaskRequirements(("chat", "native_tool_calls")),
     "role-project-lead": TaskRequirements(("chat", "native_tool_calls", "structured_output"), ("reasoning",)),
 }

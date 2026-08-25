@@ -3,7 +3,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from virtizai_core.api import create_app
 from virtizai_core.config import AppConfig
-from virtizai_core.workers import TaskClassifier, CodexWorker
+from virtizai_core.workers import TaskClassifier, CodexWorker, ManagedCodingWorkerExecutor, ExecutionRequest, WorkerExecutionBoundary
 
 
 def test_task_classifier_defaults_and_config(monkeypatch):
@@ -26,6 +26,20 @@ async def test_codex_worker_normalizes_result_and_restricts_workspace(tmp_path, 
     assert result["status"] == "succeeded"
     with pytest.raises(PermissionError):
         await CodexWorker(tmp_path).run("job-2", {"prompt": "x", "workspace": "/tmp/outside"})
+
+@pytest.mark.asyncio
+async def test_managed_coding_worker_uses_explicit_sandbox_and_repo_evidence(tmp_path):
+    workspace=tmp_path/'workspace';workspace.mkdir();(workspace/'README.md').write_text('hello\n')
+    import subprocess; subprocess.run(['git','init'],cwd=workspace,check=True,stdout=subprocess.DEVNULL);subprocess.run(['git','config','user.email','test@example.invalid'],cwd=workspace,check=True);subprocess.run(['git','config','user.name','Test'],cwd=workspace,check=True);subprocess.run(['git','add','.'],cwd=workspace,check=True);subprocess.run(['git','commit','-m','initial'],cwd=workspace,check=True,stdout=subprocess.DEVNULL)
+    fake=tmp_path/'fake-codex';fake.write_text('#!/bin/sh\necho "{\\"item\\":{\\"type\\":\\"agent_message\\",\\"text\\":\\"bounded result\\"}}"\n');fake.chmod(0o755)
+    from virtizai_core.db import Database
+    db=Database(tmp_path/'managed.db');db.open()
+    db.execute("INSERT INTO workers(id,name,worker_type,config_json) VALUES('w','W','managed_coding',?)", ('{"executable":"'+str(fake)+'","timeout_seconds":5}',))
+    db.execute("INSERT INTO environment_targets(id,name,target_type,config_json) VALUES('e','E','workspace',?)", ('{"workspace_path":"'+str(workspace)+'","allowed_worker_types":["managed_coding"]}',))
+    boundary=WorkerExecutionBoundary(db);boundary.register(ManagedCodingWorkerExecutor())
+    result=await boundary.execute(ExecutionRequest('w','e','managed_coding',{'objective':'inspect README','write_authorized':False}))
+    assert result.status=='succeeded' and result.output['sandbox']=='read-only' and result.output['files_changed']==[]
+    db.close()
 
 
 @pytest.mark.asyncio

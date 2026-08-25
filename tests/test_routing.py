@@ -105,3 +105,14 @@ def test_capability_routing_filters_and_ranks_deterministically(tmp_path: Path) 
     assert decision['selected']['model_id']=='m2' and any(x['reason']=='provider_unhealthy' for x in decision['excluded']) and len(decision['fallback_candidates'])==1
     db.execute("UPDATE models SET user_overrides_json='{}' WHERE id='m2'")
     decision=RoutingEngine(db).capability_selection('role-coding');assert decision['selected']['model_id']=='m1';assert any(x['model_id']=='m2' and x['reason']=='capability_missing' for x in decision['excluded']);db.close()
+
+def test_coding_managed_worker_is_eligible_without_native_tool_calls(tmp_path: Path) -> None:
+    db=Database(tmp_path/'managed.db');db.open()
+    db.execute("INSERT INTO providers(id,name,adapter_type,health_status) VALUES('p','P','mock','healthy')")
+    evidence='{"capability_evidence":{"coding":"verified","managed_coding_worker":"verified"}}'
+    db.execute("INSERT INTO models(id,provider_id,name,status,user_overrides_json) VALUES('m','p','managed','available',?)",(evidence,))
+    db.execute("INSERT INTO routes(id,name,role_id,priority,policy_json) VALUES('r','R','role-coding',10,'{\"capability_routing\":{\"enforce\":true}}')")
+    db.execute("INSERT INTO route_targets(route_id,provider_id,model_id,ordinal,conditions_json) VALUES('r','p','m',0,?)", ('{"execution_plan":"managed_coding_worker"}',))
+    decision=RoutingEngine(db).capability_selection('role-coding')
+    assert decision['selected']['execution_plan']=='managed_coding_worker'
+    db.close()

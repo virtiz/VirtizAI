@@ -51,6 +51,7 @@ class ProjectLeadService:
                 "objective": {"type": "string", "maxLength": 1200},
                 "acceptance_criteria": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"type": "string", "maxLength": 300}},
                 "specialist_role_id": {"type": "string", "enum": ["role-coding", "role-infrastructure"]},
+                "write_authorized": {"type": "boolean", "description": "True only when this Coding milestone is explicitly authorized to modify the configured workspace."},
             },
         }
         return [cls._tool("plan_project", {"type": "object", "additionalProperties": False,
@@ -109,15 +110,18 @@ class ProjectLeadService:
             raise ProjectLeadError("Project plan exceeds milestone limit")
         parsed: list[dict] = []
         for ordinal, item in enumerate(milestones, 1):
-            if not isinstance(item, dict) or set(item) != {"title", "objective", "acceptance_criteria", "specialist_role_id"}:
+            if not isinstance(item, dict) or not {"title", "objective", "acceptance_criteria", "specialist_role_id"}.issubset(item) or set(item) - {"title", "objective", "acceptance_criteria", "specialist_role_id", "write_authorized"}:
                 raise ProjectLeadError("Project Lead returned invalid milestone")
             title, objective, criteria, specialist = item["title"], item["objective"], item["acceptance_criteria"], item["specialist_role_id"]
             if not isinstance(title, str) or not title.strip() or len(title) > 160 or not isinstance(objective, str) or not objective.strip() or len(objective) > 1200 or specialist not in {"role-coding", "role-infrastructure"} or not isinstance(criteria, list) or not 1 <= len(criteria) <= 6 or not all(isinstance(c, str) and c and len(c) <= 300 for c in criteria):
                 raise ProjectLeadError("Project Lead returned invalid milestone")
+            write_authorized = item.get("write_authorized", False)
+            if not isinstance(write_authorized, bool):
+                raise ProjectLeadError("Project Lead returned invalid milestone")
             milestone_id = str(uuid.uuid4())
             self.database.execute("""INSERT INTO project_milestones(id,project_id,ordinal,title,objective,specialist_role_id,acceptance_criteria_json)
                 VALUES (?,?,?,?,?,?,?)""", (milestone_id, project_id, ordinal, title, objective, specialist, json.dumps(criteria)))
-            parsed.append({"id": milestone_id, "ordinal": ordinal, "title": title, "objective": objective, "specialist_role_id": specialist, "acceptance_criteria": criteria})
+            parsed.append({"id": milestone_id, "ordinal": ordinal, "title": title, "objective": objective, "specialist_role_id": specialist, "acceptance_criteria": criteria, "write_authorized": write_authorized})
         self.database.execute("UPDATE projects SET status='running',current_milestone_ordinal=1,updated_at=CURRENT_TIMESTAMP WHERE id=?", (project_id,))
         return parsed
 
@@ -131,7 +135,7 @@ class ProjectLeadService:
         project_id = self._create(session_id, objective, selection)
         try:
             plan_response = await self._infer(project_id, selection, [
-                {"role": "system", "content": "You are the configured Project Lead. Plan only bounded sequential work. Use role-coding for repository work and role-infrastructure only for a configured bounded infrastructure objective. For a request involving investigation, implementation, regression coverage, and validation, create those as separate sequential milestones: investigate first, then implement, then update an existing focused regression test, then validate. Do not combine implementation and validation in one milestone. Return one plan_project native function call; no prose plans."},
+                {"role": "system", "content": "You are the configured Project Lead. Plan only bounded sequential work. Use role-coding for repository work and role-infrastructure only for a configured bounded infrastructure objective. For a request involving investigation, implementation, regression coverage, and validation, create those as separate sequential milestones: investigate first, then implement, then update an existing focused regression test, then validate. Do not combine implementation and validation in one milestone. Set write_authorized true only for an explicitly requested bounded Coding implementation or test change; it is false for inspection and validation. Return one plan_project native function call; no prose plans."},
                 {"role": "user", "content": objective[:2000]},
             ], self._plan_tools())
             plan = self._call(plan_response, "plan_project")
@@ -144,7 +148,18 @@ class ProjectLeadService:
                     if active >= self.limits.max_active_children:
                         raise ProjectLeadError("Project already has an active child job")
                     self.database.execute("UPDATE project_milestones SET status='running',updated_at=CURRENT_TIMESTAMP WHERE id=?", (milestone["id"],))
-                    child = await self.delegation.delegate_agent(AgentWorkRequest(session_id, milestone["specialist_role_id"], coding["provider_id"], coding["model_id"], coding["worker_id"], coding["environment_id"], current_objective, project_id=project_id, context={"routing_decision": coding.get("routing_decision", {})}))
+                    child = await self.delegation.delegate_agent(AgentWorkRequest(session_id, milestone["specialist_role_id"], coding["provider_id"], coding["model_id"], coding["worker_id"], coding["environment_id"], current_objective, project_id=project_id, context={"routing_decision": coding.get("routing_decision", {}), "execution_plan": coding.get("execution_plan", "native_tool_coding"), "write_authorized": milestone["write_authorized"], "acceptance_criteria": milestone["acceptance_criteria"]}))
+                    failed = json.loads(child.get("result_json") or "{}")
+                    trace = failed.get("trace") if isinstance(failed.get("trace"), list) else []
+                    state = DelegationService.side_effect_state(trace)
+                    reason = str(failed.get("error_summary") or child.get("error_summary") or "")
+                    permitted = reason in {"Coding Agent returned malformed tool call", "Coding Agent returned multiple tool calls", "Coding Agent selected an invalid operation", "Delegated provider or execution failed"}
+                    fallback = coding.get("fallback", [])[:1]
+                    if child.get("status") != "succeeded" and milestone["specialist_role_id"] == "role-coding" and state in {"NO_TOOLS", "READ_ONLY"} and permitted and fallback:
+                        target = fallback[0]
+                        prior = [{"operation": item.get("operation"), "status": item.get("status")} for item in trace[:3] if isinstance(item, dict)]
+                        decision = {**coding.get("routing_decision", {}), "fallback_used": True, "fallback_reason": "read_only_protocol_failure", "selected": target}
+                        child = await self.delegation.delegate_agent(AgentWorkRequest(session_id, milestone["specialist_role_id"], target["provider_id"], target["model_id"], coding["worker_id"], coding["environment_id"], current_objective, project_id=project_id, context={"routing_decision": decision, "execution_plan": target.get("execution_plan", "native_tool_coding"), "write_authorized": milestone["write_authorized"], "acceptance_criteria": milestone["acceptance_criteria"], "prior_read_evidence": prior, "prior_failure": reason[:300]}))
                     evidence = self._evidence(child)
                     self.database.execute("UPDATE project_milestones SET job_id=?, evidence_json=?, result_summary=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (child["id"], json.dumps(evidence)[:self.limits.max_evidence_bytes], evidence["summary"], "reviewing" if child.get("status") == "succeeded" else "failed", milestone["id"]))
                     if child.get("status") != "succeeded":

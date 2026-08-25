@@ -41,7 +41,7 @@ from .retention import RetentionService
 from .interfaces import InterfaceRequest, InterfaceService
 from .discord import DiscordAdapter
 from .discord_gateway import DiscordGateway
-from .workers import CodexWorker, WorkerExecutionBoundary
+from .workers import CodexWorker, ManagedCodingWorkerExecutor, WorkerExecutionBoundary
 from .dev_tools import DevelopmentToolsExecutor
 from .infra_tools import InfrastructureToolsExecutor
 from .orchestration import DelegationService
@@ -347,6 +347,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     providers.restore_adapters()
     app.state.worker_execution = WorkerExecutionBoundary(database)
     app.state.worker_execution.register(DevelopmentToolsExecutor())
+    app.state.worker_execution.register(ManagedCodingWorkerExecutor())
     app.state.worker_execution.register(InfrastructureToolsExecutor(app.state.secrets if hasattr(app.state, "secrets") else None))
     jobs.register_handler("codex_worker", codex_worker.run)
     core = CoreService(database, telemetry, jobs, providers, codex_worker, app.state.events)

@@ -84,6 +84,25 @@ class DelegationService:
             return "READ_ONLY"
         return "SIDE_EFFECT_UNKNOWN"
 
+    async def _delegate_managed_coding(self, request: AgentWorkRequest, session: dict) -> dict:
+        """Normalize a configured managed coding worker into the ordinary Job contract."""
+        job_id = self.jobs.create_delegated(kind="delegated_agent", payload={"objective": request.objective, "context": request.context, "execution_plan": "managed_coding_worker"}, user_id=session["user_id"], session_id=request.session_id, project_id=request.project_id, role_id=request.role_id, provider_id=request.provider_id, model_id=request.model_id, worker_id=request.worker_id, environment_target_id=request.environment_id, objective=request.objective)
+        self.jobs.transition(job_id, "running")
+        context = request.context if isinstance(request.context, dict) else {}
+        execution = await self.workers.execute(ExecutionRequest(request.worker_id, request.environment_id, "managed_coding", {"objective": request.objective, "write_authorized": context.get("write_authorized") is True, "acceptance_criteria": context.get("acceptance_criteria", []), "prior_read_evidence": context.get("prior_read_evidence", []), "prior_failure": context.get("prior_failure", "")}, request.timeout_seconds))
+        output = execution.output if isinstance(execution.output, dict) else {}
+        changed = output.get("files_changed") if isinstance(output.get("files_changed"), list) else []
+        write_authorized = context.get("write_authorized") is True
+        side_effect = output.get("side_effect_state") if isinstance(output.get("side_effect_state"), str) else ("MUTATED" if changed else ("READ_ONLY" if not write_authorized else "SIDE_EFFECT_UNKNOWN" if execution.status != "succeeded" else "READ_ONLY"))
+        trace = [{"step": 1, "operation": "managed_coding", "status": execution.status, "execution_plan": "managed_coding_worker", "side_effect_state": side_effect}]
+        status = "succeeded" if execution.status == "succeeded" else "failed"
+        self.jobs.transition(job_id, status)
+        summary = self._summary(execution)
+        stored = {"provider_invoked": False, "execution_target": "managed_coding_worker", "routing_decision": context.get("routing_decision", {}), "trace": trace, "side_effect_state": side_effect, "status": execution.status, "output": output, "error_summary": execution.error_summary, "duration_ms": execution.duration_ms}
+        self.database.execute("UPDATE jobs SET result_json=?, result_summary=?, error_summary=? WHERE id=?", (json.dumps(stored), summary if status == "succeeded" else None, summary if status == "failed" else None, job_id))
+        self.sessions.add_message(request.session_id, "assistant", summary, {"execution_type":"delegated_agent","job_id":job_id,"role_id":request.role_id,"provider_id":request.provider_id,"model_id":request.model_id,"worker_id":request.worker_id,"environment_id":request.environment_id,"execution_plan":"managed_coding_worker","status":status})
+        return self.jobs.get(job_id) or {"id": job_id}
+
     def _validate(self, request: DelegatedWorkRequest) -> dict:
         session = self.database.fetch_one("SELECT id,user_id FROM sessions WHERE id=?", (request.session_id,))
         if session is None:
@@ -381,9 +400,13 @@ class DelegationService:
 
     async def delegate_agent(self, request: AgentWorkRequest) -> dict:
         """Run at most three native tool-call cycles within one durable delegated Job."""
+        session = self._validate(request)
+        if request.context.get("execution_plan") == "managed_coding_worker":
+            if request.role_id != "role-coding":
+                raise DelegationError("Managed coding workers are limited to Coding Agent execution")
+            return await self._delegate_managed_coding(request, session)
         if self.providers is None:
             raise DelegationError("Delegated provider inference is not configured")
-        session = self._validate(request)
         job_id = self.jobs.create_delegated(
             kind="delegated_agent", payload={"objective": request.objective, "context": request.context},
             user_id=session["user_id"], session_id=request.session_id, project_id=request.project_id,
