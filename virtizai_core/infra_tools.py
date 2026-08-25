@@ -1,18 +1,15 @@
-"""Generic typed read-only infrastructure executor.
-
-Adapters receive structured inventory/configuration only; no model supplied
-command, shell, or transport syntax is accepted.
-"""
+"""Generic bounded infrastructure execution with optional adapters."""
 from __future__ import annotations
-import json
-import urllib.request
-import asyncio
+import asyncio, json, time, urllib.parse, urllib.request
 from typing import Any
+from .infra_policy import authorize, operation_policy
 from .workers import ExecutionRequest, ExecutionResult
 
 class InfrastructureToolsExecutor:
     worker_type = "infrastructure"
-    operations = {"inspect_host", "list_vms", "inspect_vm", "inspect_service"}
+    operations = {"inspect_host", "list_vms", "inspect_vm", "inspect_service", "start_vm", "restart_vm"}
+    task_poll_attempts = 12
+    task_poll_seconds = 1.0
 
     @staticmethod
     def _config(environment: dict) -> dict[str, Any]:
@@ -21,65 +18,79 @@ class InfrastructureToolsExecutor:
         return value if isinstance(value, dict) else {}
 
     def __init__(self, secret_store=None): self.secret_store = secret_store
+    @staticmethod
+    def _error(code: str) -> ExecutionResult: return ExecutionResult("failed", error_summary=code)
+
+    @staticmethod
+    def _evidence(result: ExecutionResult, risk: str, authorization_source: str, adapter: str) -> ExecutionResult:
+        output = dict(result.output) if isinstance(result.output, dict) else {}
+        output.update({"risk_class": risk, "authorization_source": authorization_source, "adapter": adapter})
+        return ExecutionResult(result.status, output, result.error_summary, result.duration_ms)
+
+    def _request(self, endpoint: str, token_id: str, token: str, path: str, method: str = "GET") -> Any:
+        request = urllib.request.Request(endpoint.rstrip("/")+path, headers={"Authorization":"PVEAPIToken="+token_id+"="+token,"Accept":"application/json"}, method=method)
+        with urllib.request.urlopen(request, timeout=8) as response: return json.loads(response.read(100000)).get("data")
+
+    @staticmethod
+    def _normalize_vm(item: dict) -> dict[str, Any]:
+        return {"id":str(item.get("vmid")),"name":str(item.get("name", ""))[:160],"state":item.get("status"),"host":item.get("node"),"resource_type":"vm","cpu":item.get("maxcpu"),"memory":item.get("maxmem")}
 
     def _proxmox(self, request: ExecutionRequest, environment: dict, config: dict) -> ExecutionResult:
-        reference = environment.get("credential_ref")
-        endpoint = environment.get("address")
-        if not isinstance(reference, str) or not reference or self.secret_store is None or not self.secret_store.configured(reference): return ExecutionResult("failed", error_summary="Infrastructure credential reference is unavailable")
-        if not isinstance(endpoint, str) or not endpoint.startswith("https://"): return ExecutionResult("failed", error_summary="Infrastructure endpoint is invalid")
-        token = self.secret_store.get(reference)
+        reference, endpoint = environment.get("credential_ref"), environment.get("address")
+        if not isinstance(reference,str) or not reference or self.secret_store is None or not self.secret_store.configured(reference): return self._error("credential_unavailable")
+        if not isinstance(endpoint,str) or not endpoint.startswith("https://"): return self._error("endpoint_invalid")
         token_id = config.get("api_token_id")
-        if not isinstance(token_id, str) or not token_id:
-            return ExecutionResult("failed", error_summary="Infrastructure API token identity is unavailable")
-        paths = {"inspect_host": f"/api2/json/nodes/{request.payload.get('host_id')}/status", "list_vms": "/api2/json/cluster/resources?type=vm", "inspect_vm": f"/api2/json/cluster/resources?type=vm", "inspect_service": ""}
-        path = paths.get(request.operation, "")
-        if not path: return ExecutionResult("failed", error_summary="Operation is not mapped for this infrastructure adapter")
+        if not isinstance(token_id,str) or not token_id: return self._error("credential_unavailable")
         try:
-            req=urllib.request.Request(endpoint.rstrip("/")+path, headers={"Authorization": "PVEAPIToken="+token_id+"="+token, "Accept":"application/json"})
-            with urllib.request.urlopen(req, timeout=8) as response: data=json.loads(response.read(100000)).get("data")
-        except Exception: return ExecutionResult("failed", error_summary="Infrastructure adapter request failed")
-        allowed=config.get("allowed_resource_ids", [])
-        if request.operation == "inspect_host":
-            return ExecutionResult("succeeded", {"id":request.payload["host_id"],"platform":"proxmox","state":"online"} if isinstance(data,dict) else {}, None if isinstance(data,dict) else "Infrastructure adapter returned invalid data")
-        items=data if isinstance(data,list) else []
-        normalized=[{"id":str(x.get("vmid")),"name":str(x.get("name", ""))[:160],"state":x.get("status"),"host":x.get("node"),"resource_type":"vm","cpu":x.get("maxcpu"),"memory":x.get("maxmem")} for x in items if isinstance(x,dict) and (not allowed or str(x.get("vmid")) in allowed)][:50]
-        if request.operation == "list_vms": return ExecutionResult("succeeded", {"resources":normalized})
-        found=next((x for x in normalized if x["id"]==request.payload["vm_id"]),None)
-        return ExecutionResult("succeeded", found or {}, None if found else "VM not found")
+            token=self.secret_store.get(reference); inventory=self._request(endpoint,token_id,token,"/api2/json/cluster/resources?type=vm")
+            items=inventory if isinstance(inventory,list) else []; allowed=config.get("allowed_resource_ids", [])
+            normalized=[self._normalize_vm(item) for item in items if isinstance(item,dict) and str(item.get("vmid")) in allowed][:50]
+            if request.operation == "inspect_host":
+                host_id=request.payload.get("host_id"); data=self._request(endpoint,token_id,token,f"/api2/json/nodes/{urllib.parse.quote(str(host_id),safe='')}/status")
+                return ExecutionResult("succeeded",{"id":host_id,"platform":"proxmox","state":"online"} if isinstance(data,dict) else {},None if isinstance(data,dict) else "adapter_invalid_data")
+            if request.operation == "list_vms": return ExecutionResult("succeeded", {"resources":normalized})
+            vm_id=request.payload.get("vm_id"); found=next((item for item in normalized if item["id"]==vm_id),None)
+            if request.operation == "inspect_vm": return ExecutionResult("succeeded",found or {},None if found else "resource_not_found")
+            if found is None: return self._error("resource_not_found")
+            if request.operation == "start_vm" and found.get("state")=="running": return ExecutionResult("succeeded",{"resource_id":vm_id,"operation":"start_vm","accepted":False,"pre_state":"running","state":"running","outcome":"already_running"})
+            if request.operation == "restart_vm" and found.get("state")!="running": return self._error("invalid_resource_state")
+            action="start" if request.operation=="start_vm" else "reboot"; node=urllib.parse.quote(str(found["host"]),safe="")
+            task_id=self._request(endpoint,token_id,token,f"/api2/json/nodes/{node}/qemu/{urllib.parse.quote(str(vm_id),safe='')}/status/{action}","POST")
+            if not isinstance(task_id,str) or not task_id: return self._error("backend_operation_failed")
+            completed=False; task_path=urllib.parse.quote(task_id,safe="")
+            for _ in range(self.task_poll_attempts):
+                status=self._request(endpoint,token_id,token,f"/api2/json/nodes/{node}/tasks/{task_path}/status")
+                if isinstance(status,dict) and status.get("status")=="stopped":
+                    if status.get("exitstatus")!="OK": return self._error("backend_operation_failed")
+                    completed=True; break
+                time.sleep(self.task_poll_seconds)
+            if not completed: return self._error("postcondition_timeout")
+            current=self._request(endpoint,token_id,token,"/api2/json/cluster/resources?type=vm")
+            check=next((self._normalize_vm(item) for item in (current if isinstance(current,list) else []) if isinstance(item,dict) and str(item.get("vmid"))==vm_id),None)
+            if check is None or check.get("state")!="running": return self._error("postcondition_timeout")
+            return ExecutionResult("succeeded",{"resource_id":vm_id,"operation":request.operation,"accepted":True,"task_id":task_id[:240],"pre_state":found.get("state"),"state":check.get("state"),"host":check.get("host"),"outcome":"verified"})
+        except Exception: return self._error("backend_operation_failed")
 
     async def execute(self, request: ExecutionRequest, worker: dict, environment: dict) -> ExecutionResult:
-        if request.operation not in self.operations:
-            return ExecutionResult("failed", error_summary="Unsupported infrastructure operation")
-        caps = set(json.loads(worker.get("capabilities_json") or "[]")) & set(json.loads(environment.get("capabilities_json") or "[]"))
-        if request.operation not in caps or "read_infrastructure" not in caps:
-            return ExecutionResult("failed", error_summary="Infrastructure capability is not allowed")
-        config = self._config(environment); inventory = config.get("inventory")
-        allowed = config.get("allowed_resource_ids", [])
-        if request.operation == "inspect_vm" and (not isinstance(allowed, list) or request.payload.get("vm_id") not in allowed):
-            return ExecutionResult("failed", error_summary="VM is outside approved scope")
-        if config.get("adapter") == "proxmox":
-            return await asyncio.to_thread(self._proxmox, request, environment, config)
-        if not isinstance(inventory, dict):
-            return ExecutionResult("failed", error_summary="Infrastructure adapter is not configured")
-        allowed = config.get("allowed_resource_ids", [])
-        if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
-            return ExecutionResult("failed", error_summary="Infrastructure resource scope is invalid")
-        hosts = inventory.get("hosts", []); vms = inventory.get("vms", []); services = inventory.get("services", [])
-        if not all(isinstance(group, list) and all(isinstance(item, dict) for item in group) for group in (hosts, vms, services)):
-            return ExecutionResult("failed", error_summary="Infrastructure adapter inventory is invalid")
-        if request.operation == "inspect_host":
-            host_id = request.payload.get("host_id")
-            if not isinstance(host_id, str): return ExecutionResult("failed", error_summary="Invalid host identifier")
-            found = next((x for x in hosts if x.get("id") == host_id), None)
-            return ExecutionResult("succeeded", {k: found.get(k) for k in ("id", "platform", "state", "cpu", "memory")} if found else {}, None if found else "Host is outside approved scope")
-        if request.operation == "list_vms":
-            return ExecutionResult("succeeded", {"resources": [{k:x.get(k) for k in ("id","name","state","resource_type","host")} for x in vms[:50] if not allowed or x.get("id") in allowed]})
-        if request.operation == "inspect_vm":
-            vm_id = request.payload.get("vm_id")
-            if not isinstance(vm_id, str) or vm_id not in allowed: return ExecutionResult("failed", error_summary="VM is outside approved scope")
-            found = next((x for x in vms if x.get("id") == vm_id), None)
-            return ExecutionResult("succeeded", {k: found.get(k) for k in ("id","name","state","cpu","memory","host","resource_type")} if found else {}, None if found else "VM not found")
-        service_id = request.payload.get("service_id")
-        if not isinstance(service_id, str): return ExecutionResult("failed", error_summary="Invalid service identifier")
-        found = next((x for x in services if x.get("id") == service_id), None)
-        return ExecutionResult("succeeded", {k: found.get(k) for k in ("id","active","processes","restarts","health")} if found else {}, None if found else "Service is outside approved scope")
+        policy=operation_policy(request.operation)
+        if request.operation not in self.operations: return self._error("operation_not_allowed" if policy is None else "destructive_operation_disabled")
+        try: worker_caps=set(json.loads(worker.get("capabilities_json") or "[]")); environment_caps=set(json.loads(environment.get("capabilities_json") or "[]"))
+        except json.JSONDecodeError: return self._error("capability_missing")
+        if "read_infrastructure" not in worker_caps or "read_infrastructure" not in environment_caps: return self._error("capability_missing")
+        config=self._config(environment); decision=authorize(request.operation,worker_caps,environment_caps,config)
+        if not decision.allowed: return self._error(decision.code or "operation_not_allowed")
+        allowed=config.get("allowed_resource_ids", [])
+        if request.operation in {"inspect_vm","start_vm","restart_vm"} and (not isinstance(allowed,list) or request.payload.get("vm_id") not in allowed): return self._error("resource_out_of_scope")
+        if config.get("adapter")=="proxmox": return self._evidence(await asyncio.to_thread(self._proxmox,request,environment,config), decision.risk.value, decision.authorization_source or "", "proxmox")
+        inventory=config.get("inventory")
+        if not isinstance(inventory,dict): return self._error("adapter_not_configured")
+        if not isinstance(allowed,list) or not all(isinstance(item,str) for item in allowed): return self._error("resource_out_of_scope")
+        hosts,vms,services=inventory.get("hosts",[]),inventory.get("vms",[]),inventory.get("services",[])
+        if not all(isinstance(group,list) and all(isinstance(item,dict) for item in group) for group in (hosts,vms,services)): return self._error("adapter_invalid_data")
+        if request.operation=="inspect_host":
+            found=next((item for item in hosts if item.get("id")==request.payload.get("host_id")),None); return ExecutionResult("succeeded",{key:found.get(key) for key in ("id","platform","state","cpu","memory")} if found else {},None if found else "resource_out_of_scope")
+        if request.operation=="list_vms": return ExecutionResult("succeeded",{"resources":[{key:item.get(key) for key in ("id","name","state","resource_type","host")} for item in vms[:50] if item.get("id") in allowed]})
+        if request.operation=="inspect_vm":
+            found=next((item for item in vms if item.get("id")==request.payload.get("vm_id")),None); return ExecutionResult("succeeded",{key:found.get(key) for key in ("id","name","state","cpu","memory","host","resource_type")} if found else {},None if found else "resource_not_found")
+        if request.operation in {"start_vm","restart_vm"}: return self._error("adapter_not_configured")
+        found=next((item for item in services if item.get("id")==request.payload.get("service_id")),None); return ExecutionResult("succeeded",{key:found.get(key) for key in ("id","active","processes","restarts","health")} if found else {},None if found else "resource_out_of_scope")

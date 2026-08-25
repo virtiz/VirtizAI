@@ -16,6 +16,17 @@ def test_infrastructure_tool_feedback_preserves_bounded_normalized_result():
     assert feedback["result"]["id"] == "120"
     assert feedback["result"]["state"] == "running"
     assert feedback["result"]["host"] == "node-a"
+
+
+def test_infrastructure_mutation_tool_visibility_requires_persisted_policy(tmp_path):
+    db = Database(tmp_path / "tools.db"); db.open()
+    db.execute("INSERT INTO environment_targets(id,name,target_type,enabled,status,capabilities_json,config_json) VALUES('e','E','infrastructure',1,'available',?,?)", (json.dumps(["read_infrastructure", "inspect_vm", "start_vm", "restart_vm"]), json.dumps({"allowed_resource_ids":["120"], "allowed_risk_classes":["MUTATING_REVERSIBLE"]})))
+    tools = DelegationService(db, JobManager(db), WorkerExecutionBoundary(db))._infrastructure_tools("e")
+    by_name = {item["function"]["name"]: item["function"] for item in tools}
+    assert by_name["inspect_vm"]["parameters"]["properties"]["vm_id"]["enum"] == ["120"]
+    assert "start_vm" in by_name and "restart_vm" not in by_name
+    assert "command" not in by_name and "delete_vm" not in by_name
+    db.close()
 from virtizai_core.registries import EnvironmentRegistry, WorkerRegistry
 from virtizai_core.workers import WorkerExecutionBoundary
 

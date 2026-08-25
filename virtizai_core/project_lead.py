@@ -131,7 +131,7 @@ class ProjectLeadService:
         project_id = self._create(session_id, objective, selection)
         try:
             plan_response = await self._infer(project_id, selection, [
-                {"role": "system", "content": "You are the configured Project Lead. Plan only bounded sequential repository work. Every milestone must use role-coding. Return one plan_project native function call; no prose plans."},
+                {"role": "system", "content": "You are the configured Project Lead. Plan only bounded sequential work. Use role-coding for repository work and role-infrastructure only for a configured bounded infrastructure objective. Return one plan_project native function call; no prose plans."},
                 {"role": "user", "content": objective[:2000]},
             ], self._plan_tools())
             plan = self._call(plan_response, "plan_project")
