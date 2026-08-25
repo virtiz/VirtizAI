@@ -342,9 +342,10 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.events = OperationalEventService(database)
     codex_worker = CodexWorker(app_config.workspace_dir)
     app.state.codex_worker = codex_worker
+    app.state.secrets = FileSecretStore(app_config.data_dir / "secrets.json")
     app.state.worker_execution = WorkerExecutionBoundary(database)
     app.state.worker_execution.register(DevelopmentToolsExecutor())
-    app.state.worker_execution.register(InfrastructureToolsExecutor())
+    app.state.worker_execution.register(InfrastructureToolsExecutor(app.state.secrets if hasattr(app.state, "secrets") else None))
     jobs.register_handler("codex_worker", codex_worker.run)
     core = CoreService(database, telemetry, jobs, providers, codex_worker, app.state.events)
     app.state.auth = AuthAdminService(database)
@@ -369,7 +370,6 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.delegation = DelegationService(database, jobs, app.state.worker_execution, providers)
     app.state.interfaces = InterfaceService(database, core, app.state.delegation)
     app.state.discord = DiscordAdapter(app.state.interfaces, app.state.updates)
-    app.state.secrets = FileSecretStore(app_config.data_dir / "secrets.json")
     app.state.discord_gateway = DiscordGateway(app.state.discord, database, app.state.secrets, jobs, app.state.events)
 
     async def prewarm_secretary() -> None:

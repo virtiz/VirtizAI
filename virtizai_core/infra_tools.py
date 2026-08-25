@@ -5,6 +5,8 @@ command, shell, or transport syntax is accepted.
 """
 from __future__ import annotations
 import json
+import urllib.request
+import asyncio
 from typing import Any
 from .workers import ExecutionRequest, ExecutionResult
 
@@ -18,6 +20,30 @@ class InfrastructureToolsExecutor:
         except json.JSONDecodeError: value = {}
         return value if isinstance(value, dict) else {}
 
+    def __init__(self, secret_store=None): self.secret_store = secret_store
+
+    def _proxmox(self, request: ExecutionRequest, environment: dict, config: dict) -> ExecutionResult:
+        reference = environment.get("credential_ref")
+        endpoint = environment.get("address")
+        if not isinstance(reference, str) or not reference or self.secret_store is None or not self.secret_store.configured(reference): return ExecutionResult("failed", error_summary="Infrastructure credential reference is unavailable")
+        if not isinstance(endpoint, str) or not endpoint.startswith("https://"): return ExecutionResult("failed", error_summary="Infrastructure endpoint is invalid")
+        token = self.secret_store.get(reference)
+        paths = {"inspect_host": f"/api2/json/nodes/{request.payload.get('host_id')}/status", "list_vms": "/api2/json/cluster/resources?type=vm", "inspect_vm": f"/api2/json/cluster/resources?type=vm", "inspect_service": ""}
+        path = paths.get(request.operation, "")
+        if not path: return ExecutionResult("failed", error_summary="Operation is not mapped for this infrastructure adapter")
+        try:
+            req=urllib.request.Request(endpoint.rstrip("/")+path, headers={"Authorization": "PVEAPIToken="+token, "Accept":"application/json"})
+            with urllib.request.urlopen(req, timeout=8) as response: data=json.loads(response.read(100000)).get("data")
+        except Exception: return ExecutionResult("failed", error_summary="Infrastructure adapter request failed")
+        allowed=config.get("allowed_resource_ids", [])
+        if request.operation == "inspect_host":
+            return ExecutionResult("succeeded", {"id":request.payload["host_id"],"platform":"proxmox","state":"online"} if isinstance(data,dict) else {}, None if isinstance(data,dict) else "Infrastructure adapter returned invalid data")
+        items=data if isinstance(data,list) else []
+        normalized=[{"id":str(x.get("vmid")),"name":str(x.get("name", ""))[:160],"state":x.get("status"),"host":x.get("node"),"resource_type":"vm","cpu":x.get("maxcpu"),"memory":x.get("maxmem")} for x in items if isinstance(x,dict) and (not allowed or str(x.get("vmid")) in allowed)][:50]
+        if request.operation == "list_vms": return ExecutionResult("succeeded", {"resources":normalized})
+        found=next((x for x in normalized if x["id"]==request.payload["vm_id"]),None)
+        return ExecutionResult("succeeded", found or {}, None if found else "VM not found")
+
     async def execute(self, request: ExecutionRequest, worker: dict, environment: dict) -> ExecutionResult:
         if request.operation not in self.operations:
             return ExecutionResult("failed", error_summary="Unsupported infrastructure operation")
@@ -25,6 +51,8 @@ class InfrastructureToolsExecutor:
         if request.operation not in caps or "read_infrastructure" not in caps:
             return ExecutionResult("failed", error_summary="Infrastructure capability is not allowed")
         config = self._config(environment); inventory = config.get("inventory")
+        if config.get("adapter") == "proxmox":
+            return await asyncio.to_thread(self._proxmox, request, environment, config)
         if not isinstance(inventory, dict):
             return ExecutionResult("failed", error_summary="Infrastructure adapter is not configured")
         allowed = config.get("allowed_resource_ids", [])
