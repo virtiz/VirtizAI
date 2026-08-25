@@ -102,7 +102,7 @@ class InterfaceService:
         execution = policy.get("delegated_execution") if isinstance(policy, dict) else None
         if not isinstance(execution, dict) or not all(isinstance(execution.get(key), str) and execution[key] for key in ("worker_id", "environment_id")):
             raise LookupError("Delegated execution route is incomplete")
-        return {"provider_id": selected["provider_id"], "model_id": selected["model_id"], "worker_id": execution["worker_id"], "environment_id": execution["environment_id"], "execution_plan": selected.get("execution_plan", "native_tool_coding"), "routing_decision": decision, "fallback": decision.get("fallback_candidates", [])[:1]}
+        return {"provider_id": selected["provider_id"], "model_id": selected["model_id"], "worker_id": selected.get("worker_id") or execution["worker_id"], "environment_id": selected.get("environment_id") or execution["environment_id"], "execution_plan": selected.get("execution_plan", "native_tool_coding"), "routing_decision": decision, "fallback": decision.get("fallback_candidates", [])[:1]}
 
     async def delegate_for_session(self, request: InterfaceRequest, role_id: str, objective: str) -> tuple[str, SecretaryResponse]:
         if self.delegation is None:
@@ -122,7 +122,7 @@ class InterfaceService:
             fallback = selection["fallback"][0]
             decision = {**selection["routing_decision"], "fallback_used": True, "fallback_reason": "read_only_protocol_failure", "selected": fallback}
             evidence = [{"operation": item.get("operation"), "status": item.get("status")} for item in trace[:3] if isinstance(item, dict)]
-            job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, fallback["provider_id"], fallback["model_id"], selection["worker_id"], selection["environment_id"], objective, context={"routing_decision": decision, "execution_plan": fallback.get("execution_plan", "native_tool_coding"), "write_authorized": False, "prior_read_evidence": evidence, "prior_failure": str(first.get("error_summary") or job.get("error_summary") or "")[:300]}))
+            job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, fallback["provider_id"], fallback["model_id"], fallback.get("worker_id") or selection["worker_id"], fallback.get("environment_id") or selection["environment_id"], objective, context={"routing_decision": decision, "execution_plan": fallback.get("execution_plan", "native_tool_coding"), "write_authorized": False, "prior_read_evidence": evidence, "prior_failure": str(first.get("error_summary") or job.get("error_summary") or "")[:300]}))
         result = json.loads(job.get("result_json") or "{}")
         output = result.get("output") if isinstance(result.get("output"), dict) else {}
         content = str(output.get("final_summary") or job.get("error_summary") or job.get("result_summary") or f"Delegated job {job.get('status')}")[:1800]

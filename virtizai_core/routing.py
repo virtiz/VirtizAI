@@ -140,7 +140,7 @@ class RoutingEngine:
             try: conditions = json.loads(row.get("conditions_json") or "{}")
             except json.JSONDecodeError: conditions = {}
             plan = conditions.get("execution_plan", "native_tool_coding") if isinstance(conditions, dict) else "native_tool_coding"
-            entry = {"route_id":row["route_id"],"provider_id":row["provider_id"],"model_id":row["model_id"],"ordinal":row["ordinal"],"priority":row["priority"],"locality":row["locality"],"latency":row["first_token_latency_ms"] or row["expected_latency_ms"],"cost":row["relative_cost"],"capability_enforced":enforce,"execution_plan":plan}
+            entry = {"route_id":row["route_id"],"provider_id":row["provider_id"],"model_id":row["model_id"],"ordinal":row["ordinal"],"priority":row["priority"],"locality":row["locality"],"latency":row["first_token_latency_ms"] or row["expected_latency_ms"],"cost":row["relative_cost"],"capability_enforced":enforce,"execution_plan":plan,"worker_id":conditions.get("worker_id") if isinstance(conditions, dict) else None,"environment_id":conditions.get("environment_id") if isinstance(conditions, dict) else None}
             if reason: excluded.append({**entry,"reason":reason}); continue
             eligible.append(entry)
         eligible.sort(key=lambda item: (item["priority"], 0 if requirements.prefer_local and item["locality"] == "local" else 1, item["latency"] if requirements.latency_preference == "low" and item["latency"] is not None else 1e12, item["cost"] if requirements.cost_preference == "low" and item["cost"] is not None else 1e12, item["ordinal"], item["provider_id"], item["model_id"]))
