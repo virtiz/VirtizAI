@@ -33,6 +33,13 @@ def test_infrastructure_mutation_tool_visibility_requires_persisted_policy(tmp_p
 def test_coding_tests_are_not_offered_before_inspection():
     assert {item["function"]["name"] for item in DelegationService._agent_tools(False)} == {"inspect_file", "replace_text"}
     assert "run_tests" in {item["function"]["name"] for item in DelegationService._agent_tools(True)}
+
+
+def test_coding_tool_schema_describes_only_persisted_workspace_roots():
+    tools = DelegationService._agent_tools(False, ["virtizai_core", "webui"])
+    inspect = next(item["function"] for item in tools if item["function"]["name"] == "inspect_file")
+    assert "virtizai_core, webui" in inspect["description"]
+    assert "virtizai_core, webui" in inspect["parameters"]["properties"]["path"]["description"]
 from virtizai_core.registries import EnvironmentRegistry, WorkerRegistry
 from virtizai_core.workers import WorkerExecutionBoundary
 
