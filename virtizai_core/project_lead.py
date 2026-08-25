@@ -100,7 +100,7 @@ class ProjectLeadService:
         self.database.execute(
             """INSERT INTO projects(id,name,objective,status,originating_session_id,lead_role_id,lead_provider_id,lead_model_id)
                VALUES (?,?,?,'planning',?,?,?,?)""",
-            (project_id, objective[:160], objective[:2000], session_id, "role-project-lead", selection["provider_id"], selection["model_id"]),
+            (project_id, f"project-{project_id[:8]}", objective[:2000], session_id, "role-project-lead", selection["provider_id"], selection["model_id"]),
         )
         return project_id
 

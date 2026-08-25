@@ -36,6 +36,17 @@ def setup(tmp_path, replies):
     return db, ProjectLeadService(db, provider, delegation, resolve), provider, delegation
 
 
+def test_repeated_objectives_create_distinct_durable_projects(tmp_path):
+    db, service, _, _ = setup(tmp_path, [])
+    first = service._create("s", "Repeat this bounded project", {"provider_id": "p", "model_id": "m"})
+    second = service._create("s", "Repeat this bounded project", {"provider_id": "p", "model_id": "m"})
+    projects = db.fetch_all("SELECT id, name, objective FROM projects ORDER BY name")
+    assert {project["id"] for project in projects} == {first, second}
+    assert len({project["name"] for project in projects}) == 2
+    assert {project["objective"] for project in projects} == {"Repeat this bounded project"}
+    db.close()
+
+
 @pytest.mark.asyncio
 async def test_project_plan_child_job_and_acceptance_are_durable(tmp_path):
     plan = {"milestones": [{"title": "Inspect", "objective": "Inspect README.md", "acceptance_criteria": ["Read file"], "specialist_role_id": "role-coding"}]}
