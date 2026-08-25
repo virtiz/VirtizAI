@@ -58,3 +58,20 @@ async def test_model_classifier_confidence_and_malformed_output(tmp_path):
  bad={"function":{"name":"delegation_decision","arguments":"not-json"}}
  assert (await DelegationPolicyEngine(db,Provider(bad),candidates).decide('please help')).decision=='direct'
  db.close()
+
+@pytest.mark.asyncio
+async def test_single_fallback_only_before_any_tool_execution(tmp_path):
+ db,svc,_=setup(tmp_path)
+ # Add a second explicit target and make capability routing legacy-compatible.
+ db.execute("INSERT INTO providers(id,name,adapter_type,health_status) VALUES('p2','P2','mock','healthy')")
+ db.execute("INSERT INTO models(id,provider_id,name,status) VALUES('m2','p2','M2','available')")
+ db.execute("INSERT INTO route_targets(route_id,provider_id,model_id,ordinal) VALUES('r','p2','m2',1)")
+ class Fallback:
+  def __init__(self): self.requests=[]
+  async def delegate_agent(self, request):
+   self.requests.append(request)
+   if len(self.requests)==1: return {'id':'one','status':'failed','result_json':json.dumps({'trace':[]}), 'error_summary':'provider unavailable'}
+   return {'id':'two','status':'succeeded','result_json':json.dumps({'output':{'final_summary':'ok'},'trace':[]}), 'result_summary':'ok','error_summary':None}
+ svc.delegation=Fallback();req=InterfaceRequest('cli','fallback','inspect');_,response=await svc.delegate_for_session(req,'role-coding','inspect')
+ assert response.content=='ok' and len(svc.delegation.requests)==2 and svc.delegation.requests[1].context['routing_decision']['fallback_used'] is True
+ db.close()

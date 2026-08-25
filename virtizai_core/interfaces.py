@@ -102,7 +102,7 @@ class InterfaceService:
         execution = policy.get("delegated_execution") if isinstance(policy, dict) else None
         if not isinstance(execution, dict) or not all(isinstance(execution.get(key), str) and execution[key] for key in ("worker_id", "environment_id")):
             raise LookupError("Delegated execution route is incomplete")
-        return {"provider_id": selected["provider_id"], "model_id": selected["model_id"], "worker_id": execution["worker_id"], "environment_id": execution["environment_id"], "routing_decision": decision}
+        return {"provider_id": selected["provider_id"], "model_id": selected["model_id"], "worker_id": execution["worker_id"], "environment_id": execution["environment_id"], "routing_decision": decision, "fallback": decision.get("fallback_candidates", [])[:1]}
 
     async def delegate_for_session(self, request: InterfaceRequest, role_id: str, objective: str) -> tuple[str, SecretaryResponse]:
         if self.delegation is None:
@@ -114,6 +114,12 @@ class InterfaceService:
             raise LookupError("Delegated agent is unavailable")
         selection = self._delegated_execution(role_id)
         job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, selection["provider_id"], selection["model_id"], selection["worker_id"], selection["environment_id"], objective, context={"routing_decision": selection["routing_decision"]}))
+        first = json.loads(job.get("result_json") or "{}")
+        trace = first.get("trace") if isinstance(first.get("trace"), list) else []
+        if job.get("status") != "succeeded" and not trace and selection["fallback"]:
+            fallback = selection["fallback"][0]
+            decision = {**selection["routing_decision"], "fallback_used": True, "fallback_reason": "pre_tool_primary_failure", "selected": fallback}
+            job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, fallback["provider_id"], fallback["model_id"], selection["worker_id"], selection["environment_id"], objective, context={"routing_decision": decision}))
         result = json.loads(job.get("result_json") or "{}")
         output = result.get("output") if isinstance(result.get("output"), dict) else {}
         content = str(output.get("final_summary") or job.get("error_summary") or job.get("result_summary") or f"Delegated job {job.get('status')}")[:1800]
