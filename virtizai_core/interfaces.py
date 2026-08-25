@@ -116,10 +116,13 @@ class InterfaceService:
         job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, selection["provider_id"], selection["model_id"], selection["worker_id"], selection["environment_id"], objective, context={"routing_decision": selection["routing_decision"]}))
         first = json.loads(job.get("result_json") or "{}")
         trace = first.get("trace") if isinstance(first.get("trace"), list) else []
-        if job.get("status") != "succeeded" and not trace and selection["fallback"]:
+        side_effect_state = DelegationService.side_effect_state(trace)
+        protocol_failure = str(first.get("error_summary") or job.get("error_summary") or "") in {"Coding Agent returned malformed tool call", "Coding Agent returned multiple tool calls", "Coding Agent selected an invalid operation", "Delegated provider or execution failed"}
+        if job.get("status") != "succeeded" and side_effect_state in {"NO_TOOLS", "READ_ONLY"} and protocol_failure and selection["fallback"]:
             fallback = selection["fallback"][0]
-            decision = {**selection["routing_decision"], "fallback_used": True, "fallback_reason": "pre_tool_primary_failure", "selected": fallback}
-            job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, fallback["provider_id"], fallback["model_id"], selection["worker_id"], selection["environment_id"], objective, context={"routing_decision": decision}))
+            decision = {**selection["routing_decision"], "fallback_used": True, "fallback_reason": "read_only_protocol_failure", "selected": fallback}
+            evidence = [{"operation": item.get("operation"), "status": item.get("status")} for item in trace[:3] if isinstance(item, dict)]
+            job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, fallback["provider_id"], fallback["model_id"], selection["worker_id"], selection["environment_id"], objective, context={"routing_decision": decision, "prior_read_evidence": evidence, "prior_failure": str(first.get("error_summary") or job.get("error_summary") or "")[:300]}))
         result = json.loads(job.get("result_json") or "{}")
         output = result.get("output") if isinstance(result.get("output"), dict) else {}
         content = str(output.get("final_summary") or job.get("error_summary") or job.get("result_summary") or f"Delegated job {job.get('status')}")[:1800]

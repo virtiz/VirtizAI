@@ -71,6 +71,19 @@ class DelegationService:
         self.providers = providers
         self.sessions = SessionService(database)
 
+    @staticmethod
+    def side_effect_state(trace: list[dict[str, Any]]) -> str:
+        read_only = {"list_files", "inspect_file", "run_tests", "inspect_host", "list_vms", "inspect_vm", "inspect_service"}
+        mutated = {"replace_text", "apply_patch", "start_vm", "restart_vm"}
+        if not trace:
+            return "NO_TOOLS"
+        operations = {item.get("operation") for item in trace if isinstance(item, dict)}
+        if operations & mutated:
+            return "MUTATED"
+        if operations and operations.issubset(read_only):
+            return "READ_ONLY"
+        return "SIDE_EFFECT_UNKNOWN"
+
     def _validate(self, request: DelegatedWorkRequest) -> dict:
         session = self.database.fetch_one("SELECT id,user_id FROM sessions WHERE id=?", (request.session_id,))
         if session is None:
@@ -476,7 +489,7 @@ class DelegationService:
         status = "succeeded" if result.status == "succeeded" else "failed"
         self.jobs.transition(job_id, status)
         summary = self._summary(result)
-        stored = {"provider_invoked": True, "routing_decision": request.context.get("routing_decision", {}) if isinstance(request.context, dict) else {}, "selected_operation": selected_operation, "trace": trace, "status": result.status, "output": result.output, "error_summary": result.error_summary, "duration_ms": result.duration_ms, "rejection_diagnostic": rejection_diagnostic}
+        stored = {"provider_invoked": True, "routing_decision": request.context.get("routing_decision", {}) if isinstance(request.context, dict) else {}, "selected_operation": selected_operation, "trace": trace, "side_effect_state": self.side_effect_state(trace), "status": result.status, "output": result.output, "error_summary": result.error_summary, "duration_ms": result.duration_ms, "rejection_diagnostic": rejection_diagnostic}
         self.database.execute("UPDATE jobs SET result_json=?, result_summary=?, error_summary=? WHERE id=?", (json.dumps(stored), summary if status == "succeeded" else None, summary if status == "failed" else None, job_id))
         self.sessions.add_message(request.session_id, "assistant", summary, {"execution_type": "delegated_agent", "job_id": job_id, "role_id": request.role_id, "provider_id": request.provider_id, "model_id": request.model_id, "worker_id": request.worker_id, "environment_id": request.environment_id, "operation": selected_operation, "status": status})
         return self.jobs.get(job_id) or {"id": job_id}

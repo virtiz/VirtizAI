@@ -62,7 +62,7 @@ async def test_model_classifier_confidence_and_malformed_output(tmp_path):
  db.close()
 
 @pytest.mark.asyncio
-async def test_single_fallback_only_before_any_tool_execution(tmp_path):
+async def test_single_fallback_after_read_only_tool_execution(tmp_path):
  db,svc,_=setup(tmp_path)
  # Add a second explicit target and make capability routing legacy-compatible.
  db.execute("INSERT INTO providers(id,name,adapter_type,health_status) VALUES('p2','P2','mock','healthy')")
@@ -72,8 +72,8 @@ async def test_single_fallback_only_before_any_tool_execution(tmp_path):
   def __init__(self): self.requests=[]
   async def delegate_agent(self, request):
    self.requests.append(request)
-   if len(self.requests)==1: return {'id':'one','status':'failed','result_json':json.dumps({'trace':[]}), 'error_summary':'provider unavailable'}
+   if len(self.requests)==1: return {'id':'one','status':'failed','result_json':json.dumps({'trace':[{'operation':'inspect_file','status':'succeeded'}], 'error_summary':'Coding Agent returned malformed tool call'}), 'error_summary':'Coding Agent returned malformed tool call'}
    return {'id':'two','status':'succeeded','result_json':json.dumps({'output':{'final_summary':'ok'},'trace':[]}), 'result_summary':'ok','error_summary':None}
  svc.delegation=Fallback();req=InterfaceRequest('cli','fallback','inspect');_,response=await svc.delegate_for_session(req,'role-coding','inspect')
- assert response.content=='ok' and len(svc.delegation.requests)==2 and svc.delegation.requests[1].context['routing_decision']['fallback_used'] is True
+ assert response.content=='ok' and len(svc.delegation.requests)==2 and svc.delegation.requests[1].context['routing_decision']['fallback_used'] is True and svc.delegation.requests[1].context['prior_read_evidence'][0]['operation']=='inspect_file'
  db.close()
