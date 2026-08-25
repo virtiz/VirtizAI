@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -131,6 +132,17 @@ class DelegationService:
 
 
     @staticmethod
+    def _is_allowed_test_target(target: Any) -> bool:
+        if target in {"pytest", "packet5"}:
+            return True
+        if not isinstance(target, str) or len(target) > 240 or not target.startswith("tests/"):
+            return False
+        path, separator, node = target.partition("::")
+        if not path.endswith(".py") or not re.fullmatch(r"tests/[A-Za-z0-9_./-]+\.py", path):
+            return False
+        return not separator or bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", node))
+
+    @staticmethod
     def _validate_agent_action(action: Any) -> tuple[str, dict[str, Any]]:
         if not isinstance(action, dict) or set(action) != {"operation", "payload"}:
             raise DelegationError("Coding Agent returned malformed action")
@@ -151,7 +163,7 @@ class DelegationService:
                 raise DelegationError("Coding Agent selected an invalid operation")
             if "end_line" in payload and "start_line" in payload and payload["end_line"] < payload["start_line"]:
                 raise DelegationError("Coding Agent selected an invalid operation")
-        if operation == "run_tests" and payload.get("target") not in {"pytest", "packet5"}:
+        if operation == "run_tests" and not DelegationService._is_allowed_test_target(payload.get("target")):
             raise DelegationError("Coding Agent selected an invalid operation")
         if operation == "replace_text" and (not all(isinstance(payload[key], str) for key in ("path", "old_text", "new_text")) or not payload["path"] or not payload["old_text"]):
             raise DelegationError("Coding Agent selected an invalid operation")
@@ -179,7 +191,7 @@ class DelegationService:
         if include_file_listing:
             tools.insert(0, function("list_files", "List a bounded set of allowed workspace-relative files before selecting an unfamiliar file path." + scope, {"type": "object", "additionalProperties": False, "properties": {}}))
         if include_tests:
-            tools.insert(1, function("run_tests", "Run one allowlisted test target after inspecting the relevant implementation.", {"type": "object", "additionalProperties": False, "required": ["target"], "properties": {"target": {"type": "string", "enum": ["pytest", "packet5"]}}}))
+            tools.insert(1, function("run_tests", "Run one allowlisted test target after inspecting the relevant implementation. Use pytest or packet5, or one inspected tests/...py file path; no arguments or shell syntax.", {"type": "object", "additionalProperties": False, "required": ["target"], "properties": {"target": {"type": "string", "anyOf": [{"enum": ["pytest", "packet5"]}, {"pattern": "^tests/[A-Za-z0-9_./-]+\\.py(?:::[A-Za-z_][A-Za-z0-9_]*)?$"}]}}}))
         return tools
 
     def _coding_allowed_roots(self, environment_id: str) -> list[str]:

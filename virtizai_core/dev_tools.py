@@ -221,9 +221,17 @@ class DevelopmentToolsExecutor:
         if workspace is None or not workspace.is_dir():
             return ExecutionResult("failed", error_summary="Environment workspace is unavailable")
         command = self.test_targets.get(target)
-        if command is None:
+        default_timeout = self.test_timeouts.get(target)
+        if command is None and isinstance(target, str) and target.startswith("tests/"):
+            path, _, node = target.partition("::")
+            candidate = (workspace / path).resolve()
+            roots = [(workspace / root).resolve() for root in self._config(environment).get("allowed_roots", ["."]) if isinstance(root, str)]
+            if workspace in candidate.parents and candidate.is_file() and any(candidate == root or root in candidate.parents for root in roots):
+                command = (sys.executable, "-m", "pytest", "-q", target)
+                default_timeout = 45.0
+        if command is None or default_timeout is None:
             return ExecutionResult("failed", error_summary="Unsupported test target")
-        timeout = request.timeout_seconds if request.timeout_seconds is not None else self.test_timeouts[target]
+        timeout = request.timeout_seconds if request.timeout_seconds is not None else default_timeout
         if not isinstance(timeout, (int, float)) or timeout <= 0 or timeout > 120:
             return ExecutionResult("failed", error_summary="Invalid test timeout")
         started = time.perf_counter()

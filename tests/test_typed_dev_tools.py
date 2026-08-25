@@ -144,3 +144,15 @@ async def test_run_tests_packet5_target_is_fixed_and_accepts_no_injected_argumen
     assert result.status == "succeeded" and result.output["exit_code"] == 0
     assert DevelopmentToolsExecutor.test_targets["packet5"] == (__import__("sys").executable, "-m", "pytest", "-q", "tests/test_job_orchestration.py")
     database.close()
+
+
+@pytest.mark.asyncio
+async def test_run_tests_allows_one_existing_focused_test_without_pytest_arguments(tmp_path: Path):
+    database, workspace, worker_id, environment_id, boundary = setup(tmp_path)
+    tests = workspace / "tests"; tests.mkdir()
+    (tests / "test_focused.py").write_text("def test_ok(): assert True\n")
+    result = await boundary.execute(ExecutionRequest(worker_id, environment_id, "run_tests", {"target": "tests/test_focused.py"}))
+    assert result.status == "succeeded" and result.output["target"] == "tests/test_focused.py"
+    rejected = await boundary.execute(ExecutionRequest(worker_id, environment_id, "run_tests", {"target": "tests/test_focused.py -k injected"}))
+    assert rejected.status == "failed" and rejected.error_summary == "Unsupported test target"
+    database.close()

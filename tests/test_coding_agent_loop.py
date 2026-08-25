@@ -45,6 +45,13 @@ def test_coding_tool_schema_describes_only_persisted_workspace_roots():
 def test_coding_file_listing_can_be_withheld_when_bounded_index_is_available():
     names = {item["function"]["name"] for item in DelegationService._agent_tools(False, ["src"], include_file_listing=False)}
     assert names == {"inspect_file", "replace_text"}
+
+
+def test_coding_allows_one_bounded_focused_test_path_only():
+    assert DelegationService._is_allowed_test_target("tests/test_webui.py")
+    assert DelegationService._is_allowed_test_target("tests/test_webui.py::test_page")
+    assert not DelegationService._is_allowed_test_target("tests/test_webui.py -k injected")
+    assert not DelegationService._is_allowed_test_target("../tests/test_webui.py")
 from virtizai_core.registries import EnvironmentRegistry, WorkerRegistry
 from virtizai_core.workers import WorkerExecutionBoundary
 
