@@ -354,7 +354,14 @@ class DiscordGateway:
         if self.events is not None and status != previous and not (
             self._intentional_shutdown and status in {"disconnected", "disabled"}
         ):
-            await self.events.transition("gateway", "discord", "Discord gateway", status, error, "error" if status == "error" else "info", initial=previous == "disabled")
+            await self.events.transition(
+                "gateway",
+                "discord",
+                "Discord gateway",
+                status,
+                error,
+                "error" if status == "error" else "info",
+            )
 
     async def _run(self, token: str) -> None:
         if discord is None:
@@ -576,7 +583,6 @@ class DiscordGateway:
         return True
 
     async def start(self) -> None:
-        self._intentional_shutdown = True
         await self.stop()
         self._intentional_shutdown = False
         row = self.config()
@@ -595,6 +601,12 @@ class DiscordGateway:
         await self.start()
 
     async def stop(self) -> None:
+        # Persist and fan out the intentional disconnect while the Discord
+        # client is still usable. Subsequent close/disabled callbacks are
+        # suppressed so one lifecycle stop produces only one disconnect alert.
+        if self._status.status == "connected":
+            self._intentional_shutdown = False
+            await self._set_status("disconnected")
         self._intentional_shutdown = True
         self._stop.set()
         if self.client and not self.client.is_closed():

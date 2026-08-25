@@ -156,3 +156,270 @@ async def test_run_tests_allows_one_existing_focused_test_without_pytest_argumen
     rejected = await boundary.execute(ExecutionRequest(worker_id, environment_id, "run_tests", {"target": "tests/test_focused.py -k injected"}))
     assert rejected.status == "failed" and rejected.error_summary == "Unsupported test target"
     database.close()
+
+
+def test_ranged_inspection_patch_uses_absolute_file_line_offset(tmp_path):
+    import json
+
+    from virtizai_core.dev_tools import DevelopmentToolsExecutor
+    from virtizai_core.orchestration import DelegationService
+    from virtizai_core.workers import ExecutionRequest
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "sample.txt"
+    target.write_text(
+        "line1\n"
+        "line2\n"
+        "line3\n"
+        "TARGET old value\n"
+        "line5\n"
+        "line6\n"
+    )
+
+    patch = DelegationService._mutation_patch(
+        "sample.txt",
+        "TARGET old value",
+        "TARGET new value",
+        "line3\nTARGET old value\nline5",
+        {"sample.txt"},
+        3,
+    )
+
+    assert "@@ -3,3 +3,3 @@" in patch
+
+    environment = {
+        "config_json": json.dumps(
+            {
+                "workspace_path": str(workspace),
+                "allowed_roots": ["."],
+            }
+        )
+    }
+
+    request = ExecutionRequest(
+        worker_id="test-worker",
+        environment_id="test-env",
+        operation="apply_patch",
+        payload={"patch": patch, "check_first": True},
+        timeout_seconds=30,
+    )
+
+    result = DevelopmentToolsExecutor()._apply_patch(request, environment)
+
+    assert result.status == "succeeded"
+    assert result.error_summary is None
+    assert target.read_text() == (
+        "line1\n"
+        "line2\n"
+        "line3\n"
+        "TARGET new value\n"
+        "line5\n"
+        "line6\n"
+    )
+
+@pytest.mark.asyncio
+async def test_replace_text_uses_full_file_revision_after_ranged_inspection(tmp_path: Path):
+    database, workspace, worker_id, environment_id, boundary = setup(tmp_path)
+    target = workspace / "src" / "sample.txt"
+    target.parent.mkdir()
+    target.write_text("one\ntwo\nTARGET old value\nfour\nfive\n")
+
+    inspected = await boundary.execute(
+        ExecutionRequest(worker_id, environment_id, "inspect_file",
+                         {"path": "src/sample.txt", "start_line": 3, "max_lines": 1})
+    )
+    assert inspected.status == "succeeded"
+    assert inspected.output["content"] == "TARGET old value"
+    assert len(inspected.output["revision"]) == 64
+
+    replaced = await boundary.execute(
+        ExecutionRequest(
+            worker_id, environment_id, "replace_text",
+            {
+                "path": "src/sample.txt",
+                "old_text": "TARGET old value",
+                "new_text": "TARGET new value",
+                "expected_revision": inspected.output["revision"],
+            },
+        )
+    )
+
+    assert replaced.status == "succeeded"
+    assert target.read_text() == "one\ntwo\nTARGET new value\nfour\nfive\n"
+    assert replaced.output["current_revision"] == inspected.output["revision"]
+    assert replaced.output["result_revision"] != inspected.output["revision"]
+    assert "old_text" not in replaced.output
+    assert "new_text" not in replaced.output
+    assert "replacement" not in replaced.output
+    assert "replaced" not in replaced.output
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_replace_text_rejects_stale_inspection(tmp_path: Path):
+    database, workspace, worker_id, environment_id, boundary = setup(tmp_path)
+    target = workspace / "src" / "sample.txt"
+    target.parent.mkdir()
+    target.write_text("before\n")
+
+    inspected = await boundary.execute(
+        ExecutionRequest(worker_id, environment_id, "inspect_file", {"path": "src/sample.txt"})
+    )
+    target.write_text("changed externally\n")
+
+    result = await boundary.execute(
+        ExecutionRequest(
+            worker_id, environment_id, "replace_text",
+            {
+                "path": "src/sample.txt",
+                "old_text": "changed externally",
+                "new_text": "replacement",
+                "expected_revision": inspected.output["revision"],
+            },
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.error_summary == "stale_inspection"
+    assert target.read_text() == "changed externally\n"
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_replace_text_rejects_missing_and_ambiguous_old_text(tmp_path: Path):
+    database, workspace, worker_id, environment_id, boundary = setup(tmp_path)
+    target = workspace / "src" / "sample.txt"
+    target.parent.mkdir()
+    target.write_text("same\nsame\n")
+
+    inspected = await boundary.execute(
+        ExecutionRequest(worker_id, environment_id, "inspect_file", {"path": "src/sample.txt"})
+    )
+    revision = inspected.output["revision"]
+
+    empty = await boundary.execute(
+        ExecutionRequest(worker_id, environment_id, "replace_text",
+                         {"path": "src/sample.txt", "old_text": "", "new_text": "x",
+                          "expected_revision": revision})
+    )
+    assert empty.status == "failed"
+    assert empty.error_summary == "old_text_missing"
+
+    missing = await boundary.execute(
+        ExecutionRequest(worker_id, environment_id, "replace_text",
+                         {"path": "src/sample.txt", "old_text": "absent", "new_text": "x",
+                          "expected_revision": revision})
+    )
+    assert missing.status == "failed"
+    assert missing.error_summary == "old_text_missing"
+
+    ambiguous = await boundary.execute(
+        ExecutionRequest(worker_id, environment_id, "replace_text",
+                         {"path": "src/sample.txt", "old_text": "same", "new_text": "x",
+                          "expected_revision": revision})
+    )
+    assert ambiguous.status == "failed"
+    assert ambiguous.error_summary == "old_text_ambiguous"
+    assert target.read_text() == "same\nsame\n"
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_replace_text_rejects_paths_outside_allowed_roots(tmp_path: Path):
+    database, workspace, worker_id, environment_id, boundary = setup(tmp_path)
+    target = workspace / "src" / "sample.txt"
+    target.parent.mkdir()
+    target.write_text("inside\n")
+
+    inspected = await boundary.execute(
+        ExecutionRequest(worker_id, environment_id, "inspect_file", {"path": "src/sample.txt"})
+    )
+    revision = inspected.output["revision"]
+
+    for path, expected in (
+        ("../secret", "Invalid file path"),
+        ("/etc/passwd", "Invalid file path"),
+        ("outside.txt", "File path is outside allowed roots"),
+    ):
+        result = await boundary.execute(
+            ExecutionRequest(
+                worker_id, environment_id, "replace_text",
+                {"path": path, "old_text": "inside", "new_text": "changed",
+                 "expected_revision": revision},
+            )
+        )
+        assert result.status == "failed"
+        assert result.error_summary == expected
+
+    assert target.read_text() == "inside\n"
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_replace_text_result_revision_matches_written_file(tmp_path: Path):
+    import hashlib
+
+    database, workspace, worker_id, environment_id, boundary = setup(tmp_path)
+    target = workspace / "tests" / "sample.txt"
+    target.parent.mkdir()
+    target.write_text("alpha beta gamma\n")
+
+    inspected = await boundary.execute(
+        ExecutionRequest(worker_id, environment_id, "inspect_file", {"path": "tests/sample.txt"})
+    )
+
+    result = await boundary.execute(
+        ExecutionRequest(
+            worker_id, environment_id, "replace_text",
+            {
+                "path": "tests/sample.txt",
+                "old_text": "beta",
+                "new_text": "delta",
+                "expected_revision": inspected.output["revision"],
+            },
+        )
+    )
+
+    written = target.read_text()
+    assert result.status == "succeeded"
+    assert written == "alpha delta gamma\n"
+    assert result.output["result_revision"] == hashlib.sha256(written.encode()).hexdigest()
+    database.close()
+
+@pytest.mark.asyncio
+async def test_replace_text_rejects_allowed_root_that_escapes_workspace(tmp_path: Path):
+    import hashlib
+
+    workspace = tmp_path / "workspace"
+    target = workspace / "src" / "sample.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("before\n")
+
+    environment = {
+        "config_json": json.dumps(
+            {
+                "workspace_path": str(workspace),
+                "allowed_roots": [".."],
+            }
+        )
+    }
+    revision = hashlib.sha256(target.read_text().encode()).hexdigest()
+    request = ExecutionRequest(
+        worker_id="test-worker",
+        environment_id="test-env",
+        operation="replace_text",
+        payload={
+            "path": "src/sample.txt",
+            "old_text": "before",
+            "new_text": "after",
+            "expected_revision": revision,
+        },
+        timeout_seconds=30,
+    )
+
+    result = DevelopmentToolsExecutor()._replace_text(request, environment)
+
+    assert result.status == "failed"
+    assert result.error_summary == "Environment allowed roots are invalid"
+    assert target.read_text() == "before\n"

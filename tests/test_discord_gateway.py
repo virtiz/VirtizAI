@@ -313,3 +313,151 @@ async def test_discord_discovery_reports_gateway_limitation(tmp_path):
     gateway=DiscordGateway(None, db, FileSecretStore(tmp_path / "secrets.json"))
     result=await gateway.discovery()
     assert not result["ok"] and result["code"] == "gateway_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_emits_disconnect_before_client_close(tmp_path):
+    from virtizai_core.alerts import OperationalEventService
+    from virtizai_core.db import Database
+
+    db = Database(tmp_path / "state.db")
+    db.open()
+    db.execute(
+        "UPDATE discord_config SET enabled=1, alert_channel_id=? WHERE id='discord-default'",
+        ("123",),
+    )
+
+    events = OperationalEventService(db)
+
+    class Channel:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, value):
+            self.sent.append(value)
+
+    class Client:
+        def __init__(self, channel):
+            self.channel = channel
+            self.closed = False
+
+        def get_channel(self, channel_id):
+            assert channel_id == 123
+            return self.channel
+
+        def is_closed(self):
+            return self.closed
+
+        async def close(self):
+            self.closed = True
+
+    channel = Channel()
+    client = Client(channel)
+    gateway = DiscordGateway(
+        None,
+        db,
+        FileSecretStore(tmp_path / "secrets.json"),
+        events=events,
+    )
+    gateway.client = client
+    gateway._status = type(gateway._status)("connected")
+
+    # Seed the persisted gateway state as an initial connected state.
+    await events.transition(
+        "gateway",
+        "discord",
+        "Discord gateway",
+        "connected",
+        initial=True,
+    )
+
+    await gateway.stop()
+
+    assert client.closed is True
+    assert channel.sent == ["🔴 Gateway Disconnected\nDiscord gateway"]
+
+    latest = db.fetch_one(
+        """SELECT new_state, notification_status
+           FROM operational_events
+           WHERE component_type='gateway' AND component_id='discord'
+           ORDER BY created_at DESC LIMIT 1"""
+    )
+    assert latest["new_state"] == "disconnected"
+    assert latest["notification_status"] == "delivered"
+
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_connected_after_persisted_disconnect_is_not_initially_suppressed(tmp_path):
+    from virtizai_core.alerts import OperationalEventService
+    from virtizai_core.db import Database
+
+    db = Database(tmp_path / "state.db")
+    db.open()
+    db.execute(
+        "UPDATE discord_config SET enabled=1, alert_channel_id=? WHERE id='discord-default'",
+        ("123",),
+    )
+
+    events = OperationalEventService(db)
+
+    class Channel:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, value):
+            self.sent.append(value)
+
+    class Client:
+        def __init__(self, channel):
+            self.channel = channel
+
+        def get_channel(self, channel_id):
+            assert channel_id == 123
+            return self.channel
+
+    # This represents the durable state left by the previous process.
+    await events.transition(
+        "gateway",
+        "discord",
+        "Discord gateway",
+        "connected",
+        initial=True,
+    )
+    await events.transition(
+        "gateway",
+        "discord",
+        "Discord gateway",
+        "disconnected",
+    )
+
+    channel = Channel()
+    gateway = DiscordGateway(
+        None,
+        db,
+        FileSecretStore(tmp_path / "secrets.json"),
+        events=events,
+    )
+    gateway.client = Client(channel)
+
+    # A newly constructed gateway starts in-memory as disabled, but persisted
+    # history proves this is a recovery, not a first-ever initial state.
+    assert gateway._status.status == "disabled"
+
+    await gateway._set_status("connected")
+
+    assert channel.sent == ["🟢 Gateway Connected\nDiscord gateway"]
+
+    latest = db.fetch_one(
+        """SELECT previous_state, new_state, initial_state, notification_status
+           FROM operational_events
+           WHERE component_type='gateway' AND component_id='discord'
+           ORDER BY created_at DESC LIMIT 1"""
+    )
+    assert latest["previous_state"] == "disconnected"
+    assert latest["new_state"] == "connected"
+    assert latest["initial_state"] == 0
+    assert latest["notification_status"] == "delivered"
+
+    db.close()
