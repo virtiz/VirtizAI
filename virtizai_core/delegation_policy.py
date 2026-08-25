@@ -32,6 +32,8 @@ class DelegationPolicyEngine:
             return DelegationDecision("delegate", "role-project-lead", 1.0, "explicit_project", "explicit-user", text[9:].strip())
         if text.startswith("/coding ") and text[8:].strip():
             return DelegationDecision("delegate", "role-coding", 1.0, "explicit_coding", "explicit-user", text[8:].strip())
+        if re.search(r"\b(what|show|inspect|list|is)\b.*\b(vm|vms|container|containers|service|services|host|hosts)\b", lowered) and not re.search(r"\b(what is|explain|architecture)\b", lowered):
+            return DelegationDecision("delegate", "role-infrastructure", 1.0, "bounded_infrastructure_read", "deterministic", text)
         multi_step = re.search(r"\b(plan|manage|milestone|multi-step|multiple files|end-to-end|implementation and validation)\b", lowered)
         engineering = re.search(r"\b(implement|build|refactor|feature|release|code|repository|tests?)\b", lowered)
         if multi_step and engineering:
@@ -63,7 +65,7 @@ class DelegationPolicyEngine:
             choice, role, confidence, reason = args["decision"], args["role_id"], args["confidence"], args["reason_code"]
             if choice not in {"direct","delegate"} or not isinstance(confidence,(int,float)) or not 0 <= confidence <= 1 or reason not in {"coding_request","project_request","ordinary_conversation","technical_explanation","ambiguous"}: return None
             if choice == "direct": return DelegationDecision("direct", None, float(confidence), reason, "model", "") if role is None else None
-            if role not in {"role-coding", "role-project-lead"} or confidence < self.high_confidence: return DelegationDecision("direct", None, float(confidence), "classifier_below_threshold", "model", "")
+            if role not in {"role-coding", "role-project-lead", "role-infrastructure"} or confidence < self.high_confidence: return DelegationDecision("direct", None, float(confidence), "classifier_below_threshold", "model", "")
             if self.database.fetch_one("SELECT id FROM roles WHERE id=? AND enabled=1", (role,)) is None: return None
             return DelegationDecision("delegate", role, float(confidence), reason, "model", content)
         except Exception: return None

@@ -38,7 +38,7 @@ def setup(tmp_path, replies):
 
 @pytest.mark.asyncio
 async def test_project_plan_child_job_and_acceptance_are_durable(tmp_path):
-    plan = {"milestones": [{"title": "Inspect", "objective": "Inspect README.md", "acceptance_criteria": ["Read file"]}]}
+    plan = {"milestones": [{"title": "Inspect", "objective": "Inspect README.md", "acceptance_criteria": ["Read file"], "specialist_role_id": "role-coding"}]}
     db, service, provider, delegation = setup(tmp_path, [call("plan_project", plan), call("review_milestone", {"decision": "ACCEPT_MILESTONE", "summary": "criteria met"})])
     project = await service.run("s", "Plan a multi-step repository task", {"provider_id": "p", "model_id": "m"})
     assert project["status"] == "succeeded"
@@ -61,7 +61,7 @@ async def test_malformed_plan_blocks_safely(tmp_path):
 
 @pytest.mark.asyncio
 async def test_one_revision_is_executed_and_second_is_blocked(tmp_path):
-    plan = {"milestones": [{"title": "Inspect", "objective": "Inspect README.md", "acceptance_criteria": ["Read"]}]}
+    plan = {"milestones": [{"title": "Inspect", "objective": "Inspect README.md", "acceptance_criteria": ["Read"], "specialist_role_id": "role-coding"}]}
     replies = [call("plan_project", plan), call("review_milestone", {"decision": "REVISE_MILESTONE", "summary": "need focused retry", "revised_objective": "Inspect README.md again"}), call("review_milestone", {"decision": "ACCEPT_MILESTONE", "summary": "now met"})]
     db, service, _, delegation = setup(tmp_path, replies)
     project = await service.run("s", "project", {"provider_id": "p", "model_id": "m"})
@@ -72,7 +72,7 @@ async def test_one_revision_is_executed_and_second_is_blocked(tmp_path):
 
 @pytest.mark.asyncio
 async def test_second_revision_is_blocked(tmp_path):
-    plan = {"milestones": [{"title": "Inspect", "objective": "Inspect README.md", "acceptance_criteria": ["Read"]}]}
+    plan = {"milestones": [{"title": "Inspect", "objective": "Inspect README.md", "acceptance_criteria": ["Read"], "specialist_role_id": "role-coding"}]}
     replies = [call("plan_project", plan), call("review_milestone", {"decision": "REVISE_MILESTONE", "summary": "retry", "revised_objective": "again"}), call("review_milestone", {"decision": "REVISE_MILESTONE", "summary": "retry", "revised_objective": "again"})]
     db, service, _, _ = setup(tmp_path, replies)
     project = await service.run("s", "project", {"provider_id": "p", "model_id": "m"})

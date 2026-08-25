@@ -69,7 +69,7 @@ async def test_release_api_plans_verified_updates(tmp_path: Path) -> None:
 async def test_startup_marks_matching_pending_update_known_good(tmp_path: Path) -> None:
     config = AppConfig(tmp_path / "data", tmp_path / "workspace", tmp_path / "logs", tmp_path / "data" / "state.db")
     app = create_app(config)
-    app.state.database.execute("INSERT INTO update_history(id, version, action, status, metadata_json) VALUES ('pending', ?, 'native_update', 'installed_pending_health', ?)", (__version__, json.dumps({"backup": {"verified": True, "schema_version": 18}})))
+    app.state.database.execute("INSERT INTO update_history(id, version, action, status, metadata_json) VALUES ('pending', ?, 'native_update', 'installed_pending_health', ?)", (__version__, json.dumps({"backup": {"verified": True, "schema_version": 19}})))
     restarted = create_app(config)
     assert restarted
     assert app.state.database.fetch_one("SELECT status FROM update_history WHERE id='pending'")["status"] == "known_good"

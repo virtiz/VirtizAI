@@ -769,6 +769,11 @@ def migration_18(connection: sqlite3.Connection) -> None:
     """)
 
 
+def migration_19(connection: sqlite3.Connection) -> None:
+    """Add the generic Infrastructure Agent role."""
+    connection.execute("INSERT INTO roles(id,name,purpose,requirements_json) VALUES ('role-infrastructure','infrastructure','Typed read-only infrastructure operations','{\"infrastructure\":true}') ON CONFLICT(id) DO NOTHING")
+
+
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -788,6 +793,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (16, migration_16),
     (17, migration_17),
     (18, migration_18),
+    (19, migration_19),
 )
 
 

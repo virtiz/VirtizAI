@@ -43,6 +43,7 @@ from .discord import DiscordAdapter
 from .discord_gateway import DiscordGateway
 from .workers import CodexWorker, WorkerExecutionBoundary
 from .dev_tools import DevelopmentToolsExecutor
+from .infra_tools import InfrastructureToolsExecutor
 from .orchestration import DelegationService
 from .secrets import FileSecretStore
 from .transactions import StartupTransactionReconciler
@@ -343,6 +344,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.codex_worker = codex_worker
     app.state.worker_execution = WorkerExecutionBoundary(database)
     app.state.worker_execution.register(DevelopmentToolsExecutor())
+    app.state.worker_execution.register(InfrastructureToolsExecutor())
     jobs.register_handler("codex_worker", codex_worker.run)
     core = CoreService(database, telemetry, jobs, providers, codex_worker, app.state.events)
     app.state.auth = AuthAdminService(database)

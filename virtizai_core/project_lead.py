@@ -45,11 +45,12 @@ class ProjectLeadService:
     def _plan_tools(cls) -> list[dict]:
         milestone = {
             "type": "object", "additionalProperties": False,
-            "required": ["title", "objective", "acceptance_criteria"],
+                "required": ["title", "objective", "acceptance_criteria", "specialist_role_id"],
             "properties": {
                 "title": {"type": "string", "maxLength": 160},
                 "objective": {"type": "string", "maxLength": 1200},
                 "acceptance_criteria": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"type": "string", "maxLength": 300}},
+                "specialist_role_id": {"type": "string", "enum": ["role-coding", "role-infrastructure"]},
             },
         }
         return [cls._tool("plan_project", {"type": "object", "additionalProperties": False,
@@ -108,15 +109,15 @@ class ProjectLeadService:
             raise ProjectLeadError("Project plan exceeds milestone limit")
         parsed: list[dict] = []
         for ordinal, item in enumerate(milestones, 1):
-            if not isinstance(item, dict) or set(item) != {"title", "objective", "acceptance_criteria"}:
+            if not isinstance(item, dict) or set(item) != {"title", "objective", "acceptance_criteria", "specialist_role_id"}:
                 raise ProjectLeadError("Project Lead returned invalid milestone")
-            title, objective, criteria = item["title"], item["objective"], item["acceptance_criteria"]
-            if not isinstance(title, str) or not title.strip() or len(title) > 160 or not isinstance(objective, str) or not objective.strip() or len(objective) > 1200 or not isinstance(criteria, list) or not 1 <= len(criteria) <= 6 or not all(isinstance(c, str) and c and len(c) <= 300 for c in criteria):
+            title, objective, criteria, specialist = item["title"], item["objective"], item["acceptance_criteria"], item["specialist_role_id"]
+            if not isinstance(title, str) or not title.strip() or len(title) > 160 or not isinstance(objective, str) or not objective.strip() or len(objective) > 1200 or specialist not in {"role-coding", "role-infrastructure"} or not isinstance(criteria, list) or not 1 <= len(criteria) <= 6 or not all(isinstance(c, str) and c and len(c) <= 300 for c in criteria):
                 raise ProjectLeadError("Project Lead returned invalid milestone")
             milestone_id = str(uuid.uuid4())
             self.database.execute("""INSERT INTO project_milestones(id,project_id,ordinal,title,objective,specialist_role_id,acceptance_criteria_json)
-                VALUES (?,?,?,?,?,'role-coding',?)""", (milestone_id, project_id, ordinal, title, objective, json.dumps(criteria)))
-            parsed.append({"id": milestone_id, "ordinal": ordinal, "title": title, "objective": objective, "acceptance_criteria": criteria})
+                VALUES (?,?,?,?,?,?,?)""", (milestone_id, project_id, ordinal, title, objective, specialist, json.dumps(criteria)))
+            parsed.append({"id": milestone_id, "ordinal": ordinal, "title": title, "objective": objective, "specialist_role_id": specialist, "acceptance_criteria": criteria})
         self.database.execute("UPDATE projects SET status='running',current_milestone_ordinal=1,updated_at=CURRENT_TIMESTAMP WHERE id=?", (project_id,))
         return parsed
 
@@ -135,15 +136,15 @@ class ProjectLeadService:
             ], self._plan_tools())
             plan = self._call(plan_response, "plan_project")
             milestones = self._persist_plan(project_id, plan.get("milestones"))
-            coding = self.resolve_execution("role-coding")
             for milestone in milestones:
+                coding = self.resolve_execution(milestone["specialist_role_id"])
                 current_objective = milestone["objective"]
                 while True:
                     active = self.database.fetch_one("SELECT COUNT(*) AS n FROM project_milestones WHERE project_id=? AND status='running'", (project_id,))["n"]
                     if active >= self.limits.max_active_children:
                         raise ProjectLeadError("Project already has an active child job")
                     self.database.execute("UPDATE project_milestones SET status='running',updated_at=CURRENT_TIMESTAMP WHERE id=?", (milestone["id"],))
-                    child = await self.delegation.delegate_agent(AgentWorkRequest(session_id, "role-coding", coding["provider_id"], coding["model_id"], coding["worker_id"], coding["environment_id"], current_objective, project_id=project_id))
+                    child = await self.delegation.delegate_agent(AgentWorkRequest(session_id, milestone["specialist_role_id"], coding["provider_id"], coding["model_id"], coding["worker_id"], coding["environment_id"], current_objective, project_id=project_id))
                     evidence = self._evidence(child)
                     self.database.execute("UPDATE project_milestones SET job_id=?, evidence_json=?, result_summary=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (child["id"], json.dumps(evidence)[:self.limits.max_evidence_bytes], evidence["summary"], "reviewing" if child.get("status") == "succeeded" else "failed", milestone["id"]))
                     if child.get("status") != "succeeded":
