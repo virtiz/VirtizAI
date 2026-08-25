@@ -7,11 +7,13 @@ from typing import Any
 
 from .adapters import DiscoveredModel, InferenceResponse, MockProviderAdapter, OllamaAdapter, OpenAICompatibleAdapter, ProviderAdapter
 from .db import Database
+from .secrets import SecretStore
 
 
 class ProviderRegistry:
-    def __init__(self, database: Database) -> None:
+    def __init__(self, database: Database, secrets: SecretStore | None = None) -> None:
         self.database = database
+        self.secrets = secrets
         self.adapters: dict[str, ProviderAdapter] = {}
 
     def register_adapter(self, provider_id: str, adapter: ProviderAdapter) -> None:
@@ -63,6 +65,13 @@ class ProviderRegistry:
             base_url = config.get("base_url")
             if not isinstance(base_url, str) or not base_url.strip(): raise ValueError("OpenAI-compatible providers require config.base_url")
             api_key = config.get("api_key")
+            credential_ref = config.get("credential_ref")
+            if credential_ref is not None:
+                if not isinstance(credential_ref, str) or not credential_ref:
+                    raise ValueError("OpenAI-compatible credential_ref must be a non-empty string")
+                api_key = self.secrets.get(credential_ref) if self.secrets else None
+                if not api_key:
+                    raise ValueError("OpenAI-compatible credential reference is unavailable")
             if api_key is not None and not isinstance(api_key, str): raise ValueError("OpenAI-compatible config.api_key must be a string")
             return OpenAICompatibleAdapter(base_url, float(config.get("timeout_seconds", 20)), api_key, config.get("chat_options"))
         raise ValueError(f"Unsupported adapter type: {adapter_type}")

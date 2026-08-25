@@ -10,6 +10,7 @@ import pytest
 from virtizai_core.adapters import AdapterError, OllamaAdapter, OpenAICompatibleAdapter
 from virtizai_core.db import Database
 from virtizai_core.providers import ProviderRegistry
+from virtizai_core.secrets import MemorySecretStore
 
 
 @pytest.fixture
@@ -71,6 +72,19 @@ async def test_persistence_restoration_and_provider_redaction(tmp_path: Path, se
     assert "test-secret" not in registry.list_providers()[0]["config_json"]
     restored = ProviderRegistry(database); restored.restore_adapters()
     assert (await restored.chat(provider_id, "model-a", [{"role": "user", "content": "hello"}])).content == "answer"
+    database.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_provider_resolves_credential_ref_without_persisting_secret(tmp_path: Path, server):
+    base_url, _, _ = server
+    database = Database(tmp_path / "state.db"); database.open()
+    secrets = MemorySecretStore(); secrets.set("cloud", "test-secret")
+    registry = ProviderRegistry(database, secrets)
+    provider_id = registry.create_provider("Cloud", "openai_compatible", "ignored", {"base_url": base_url, "credential_ref": "cloud"})
+    assert (await registry.chat(provider_id, "model-a", [{"role": "user", "content": "hello"}])).content == "answer"
+    public = registry.list_providers()[0]
+    assert "test-secret" not in public["config_json"] and "credential_ref" in public["config_json"]
     database.close()
 
 
