@@ -77,7 +77,11 @@ class InfrastructureToolsExecutor:
                     completed=True; break
                 time.sleep(self.task_poll_seconds)
             if not completed: return self._error("postcondition_timeout")
-            check=next((item for item in self._proxmox_vms(endpoint, token_id, token, config, [vm_id]) if item["id"] == vm_id), None)
+            check = None
+            for _ in range(self.task_poll_attempts):
+                check=next((item for item in self._proxmox_vms(endpoint, token_id, token, config, [vm_id]) if item["id"] == vm_id), None)
+                if check is not None and check.get("state") == "running": break
+                time.sleep(self.task_poll_seconds)
             if check is None or check.get("state")!="running": return self._error("postcondition_timeout")
             return ExecutionResult("succeeded",{"resource_id":vm_id,"operation":request.operation,"accepted":True,"task_id":task_id[:240],"pre_state":found.get("state"),"state":check.get("state"),"host":check.get("host"),"outcome":"verified"})
         except Exception: return self._error("backend_operation_failed")
