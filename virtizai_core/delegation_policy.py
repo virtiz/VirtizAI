@@ -38,8 +38,8 @@ class DelegationPolicyEngine:
             return DelegationDecision("delegate", "role-infrastructure", 1.0, "bounded_infrastructure_read", "deterministic", text)
         multi_step = re.search(r"\b(plan|manage|milestone|multi-step|multiple files|end-to-end|implementation and validation)\b", lowered)
         engineering = re.search(r"\b(implement|build|refactor|feature|release|code|repository|tests?)\b", lowered)
-        delivery = re.search(r"\b(add|build|implement|refactor)\b.*\b(page|dashboard|feature|integration|workflow|component)\b", lowered)
-        validation = re.search(r"\b(add|write|run)\s+tests?\b|\b(report|verify|validate)\b", lowered)
+        delivery = re.search(r"\b(add|build|implement|refactor|make)\b.*\b(page|dashboard|feature|integration|workflow|component|improvement)\b", lowered)
+        validation = re.search(r"\b(add|write|run)\b.*\btests?\b|\b(report|verify|validate)\b", lowered)
         if (multi_step and engineering) or (delivery and validation):
             return DelegationDecision("delegate", "role-project-lead", 1.0, "bounded_project_request", "deterministic", text)
         if re.search(r"\b(edit|modify|fix|implement|patch|change)\b.*\b(code|source|repository|repo|file|module|function|class|test|tests|readme)\b", lowered) or re.search(r"\brun\s+(?:the\s+)?(?:project\s+)?tests?\b", lowered):

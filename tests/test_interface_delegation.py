@@ -39,6 +39,7 @@ def test_hybrid_deterministic_rules_are_conservative(tmp_path):
  assert policy.deterministic('/project plan an implementation and validation project').role_id=='role-project-lead'
  assert policy.deterministic('Plan a multi-step feature implementation and validation').role_id=='role-project-lead'
  assert policy.deterministic('Add a small improvements page to the WebUI that shows current environment health, add tests, and report what changed.').role_id=='role-project-lead'
+ assert policy.deterministic('Inspect the WebUI health display, make one small clarity improvement, add a regression test, run the focused tests, and summarize the result.').role_id=='role-project-lead'
  assert policy.deterministic('Fix the source file parser').role_id=='role-coding'
  assert policy.deterministic('Restart the approved test VM').role_id=='role-infrastructure'
  assert policy.deterministic('Explain this architecture') is None
