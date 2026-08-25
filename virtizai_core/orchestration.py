@@ -359,7 +359,10 @@ class DelegationService:
                 if infrastructure and execution.status != "succeeded":
                     code = execution.error_summary if execution.error_summary in {"operation_not_allowed", "risk_not_authorized", "resource_out_of_scope", "capability_missing", "destructive_operation_disabled", "invalid_resource_state", "backend_operation_failed", "postcondition_timeout"} else "infrastructure_execution_failed"
                     rejection_diagnostic = {"code": code, "operation": selected_operation, "resource_id": str(payload.get("vm_id", ""))[:120]}
-                trace.append({"step": step, "operation": selected_operation, "status": execution.status})
+                evidence = execution.output if isinstance(execution.output, dict) else {}
+                trace.append({"step": step, "operation": selected_operation, "status": execution.status,
+                              "risk_class": evidence.get("risk_class"), "authorization_source": evidence.get("authorization_source"),
+                              "adapter": evidence.get("adapter"), "resource_id": str(evidence.get("resource_id", payload.get("vm_id", "")))[:120]})
                 if execution.status != "succeeded":
                     result = execution
                     break
