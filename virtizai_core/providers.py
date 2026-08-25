@@ -1,13 +1,31 @@
 from __future__ import annotations
 
 import json
+import shutil
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from .adapters import DiscoveredModel, InferenceResponse, MockProviderAdapter, OllamaAdapter, OpenAICompatibleAdapter, ProviderAdapter
+from .adapters import AdapterError, DiscoveredModel, InferenceResponse, MockProviderAdapter, OllamaAdapter, OpenAICompatibleAdapter, ProviderAdapter, ProviderHealth
 from .db import Database
 from .secrets import SecretStore
+
+
+class ManagedCodingProviderAdapter:
+    """A generic execution target catalogue entry, not a chat/tool-call provider."""
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.executable = str(config.get("executable", "codex"))
+        self.model_name = str(config.get("model_name", "managed-coding"))
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth("healthy" if (shutil.which(self.executable) or __import__("pathlib").Path(self.executable).exists()) else "unavailable")
+    async def list_models(self) -> list[DiscoveredModel]:
+        return [DiscoveredModel(self.model_name, state="available", capabilities={"coding": True, "managed_coding_worker": True})]
+    async def get_model_metadata(self, model_name: str) -> DiscoveredModel:
+        return (await self.list_models())[0]
+    async def chat(self, *args, **kwargs) -> InferenceResponse:
+        raise AdapterError("Managed coding execution targets do not provide chat inference")
+    async def prewarm(self, *args, **kwargs) -> float: return 0.0
+    async def residency(self) -> set[str]: return set()
 
 
 class ProviderRegistry:
@@ -31,6 +49,8 @@ class ProviderRegistry:
             elif provider["adapter_type"] == "mock":
                 models = [row["name"] for row in self.database.fetch_all("SELECT name FROM models WHERE provider_id = ?", (provider["id"],))]
                 self.register_adapter(provider["id"], MockProviderAdapter(models, response_prefix=provider["name"]))
+            elif provider["adapter_type"] == "managed_coding_worker":
+                self.register_adapter(provider["id"], self._adapter("managed_coding_worker", provider["endpoint"], json.loads(provider["config_json"] or "{}")))
 
     def create_provider(self, name: str, adapter_type: str, endpoint: str | None, config: dict[str, Any] | None = None, adapter: ProviderAdapter | None = None) -> str:
         existing = self.database.fetch_one(
@@ -74,6 +94,8 @@ class ProviderRegistry:
                     raise ValueError("OpenAI-compatible credential reference is unavailable")
             if api_key is not None and not isinstance(api_key, str): raise ValueError("OpenAI-compatible config.api_key must be a string")
             return OpenAICompatibleAdapter(base_url, float(config.get("timeout_seconds", 20)), api_key, config.get("chat_options"))
+        if adapter_type == "managed_coding_worker":
+            return ManagedCodingProviderAdapter(config)
         raise ValueError(f"Unsupported adapter type: {adapter_type}")
 
     def adapter_for(self, provider_id: str) -> ProviderAdapter:
