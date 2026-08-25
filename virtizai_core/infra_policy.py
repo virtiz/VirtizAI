@@ -50,6 +50,15 @@ def operation_policy(operation: str) -> InfrastructureOperationPolicy | None:
     return OPERATIONS.get(operation)
 
 
+def resource_scope(config: dict[str, Any], operation: str) -> list[str]:
+    """Return a bounded operation-specific scope, falling back to read scope."""
+    scoped = config.get("operation_resource_ids", {})
+    values = scoped.get(operation) if isinstance(scoped, dict) else None
+    if values is None:
+        values = config.get("allowed_resource_ids", [])
+    return [value for value in values[:50] if isinstance(value, str) and 0 < len(value) <= 120] if isinstance(values, list) else []
+
+
 def authorize(operation: str, worker_capabilities: set[str], environment_capabilities: set[str], config: dict[str, Any]) -> AuthorizationDecision:
     policy = operation_policy(operation)
     if policy is None or not policy.agent_allowed:

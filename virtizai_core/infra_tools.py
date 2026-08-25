@@ -2,7 +2,7 @@
 from __future__ import annotations
 import asyncio, json, time, urllib.parse, urllib.request
 from typing import Any
-from .infra_policy import authorize, operation_policy
+from .infra_policy import authorize, operation_policy, resource_scope
 from .workers import ExecutionRequest, ExecutionResult
 
 class InfrastructureToolsExecutor:
@@ -43,7 +43,7 @@ class InfrastructureToolsExecutor:
         if not isinstance(token_id,str) or not token_id: return self._error("credential_unavailable")
         try:
             token=self.secret_store.get(reference); inventory=self._request(endpoint,token_id,token,"/api2/json/cluster/resources?type=vm")
-            items=inventory if isinstance(inventory,list) else []; allowed=config.get("allowed_resource_ids", [])
+            items=inventory if isinstance(inventory,list) else []; allowed=resource_scope(config, request.operation)
             normalized=[self._normalize_vm(item) for item in items if isinstance(item,dict) and str(item.get("vmid")) in allowed][:50]
             if request.operation == "inspect_host":
                 host_id=request.payload.get("host_id"); data=self._request(endpoint,token_id,token,f"/api2/json/nodes/{urllib.parse.quote(str(host_id),safe='')}/status")
@@ -79,7 +79,7 @@ class InfrastructureToolsExecutor:
         if "read_infrastructure" not in worker_caps or "read_infrastructure" not in environment_caps: return self._error("capability_missing")
         config=self._config(environment); decision=authorize(request.operation,worker_caps,environment_caps,config)
         if not decision.allowed: return self._error(decision.code or "operation_not_allowed")
-        allowed=config.get("allowed_resource_ids", [])
+        allowed=resource_scope(config, request.operation)
         if request.operation in {"inspect_vm","start_vm","restart_vm"} and (not isinstance(allowed,list) or request.payload.get("vm_id") not in allowed): return self._error("resource_out_of_scope")
         if config.get("adapter")=="proxmox": return self._evidence(await asyncio.to_thread(self._proxmox,request,environment,config), decision.risk.value, decision.authorization_source or "", "proxmox")
         inventory=config.get("inventory")

@@ -8,7 +8,7 @@ from typing import Any
 
 from .db import Database
 from .jobs import JobManager
-from .infra_policy import authorize, operation_policy
+from .infra_policy import authorize, operation_policy, resource_scope
 from .services import SessionService
 from .workers import ExecutionRequest, ExecutionResult, WorkerExecutionBoundary
 
@@ -181,8 +181,7 @@ class DelegationService:
         row = self.database.fetch_one("SELECT config_json,capabilities_json FROM environment_targets WHERE id=?", (environment_id,))
         try: config = json.loads(row["config_json"] or "{}") if row else {}
         except json.JSONDecodeError: config = {}
-        allowed = config.get("allowed_resource_ids", []) if isinstance(config, dict) else []
-        allowed = [item for item in allowed[:50] if isinstance(item, str) and 0 < len(item) <= 120]
+        allowed = resource_scope(config, "inspect_vm") if isinstance(config, dict) else []
         try: caps = set(json.loads(row["capabilities_json"] or "[]")) if row else set()
         except json.JSONDecodeError: caps = set()
         worker = self.database.fetch_one("SELECT capabilities_json FROM workers WHERE id=?", (worker_id,)) if worker_id else None
@@ -192,7 +191,7 @@ class DelegationService:
         for operation in ("start_vm", "restart_vm"):
             decision = authorize(operation, worker_caps, caps, config if isinstance(config, dict) else {})
             if decision.allowed:
-                definitions.append(fn(operation, ["vm_id"], {"vm_id":{"type":"string","enum":allowed}}))
+                definitions.append(fn(operation, ["vm_id"], {"vm_id":{"type":"string","enum":resource_scope(config, operation)}}))
         return definitions
 
     @staticmethod
