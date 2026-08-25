@@ -57,6 +57,7 @@ async def test_openai_compatible_native_tools_preserve_configured_chat_options(s
     assert result.content == "" and result.tool_calls[0]["function"]["name"] == "inspect_file"
     request = requests[-1][3]
     assert request["thinking_budget"] == 0 and request["tools"] == tools and request["tool_choice"] == "auto"
+    assert request["parallel_tool_calls"] is False
 
 
 @pytest.mark.asyncio

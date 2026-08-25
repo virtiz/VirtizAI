@@ -209,7 +209,12 @@ class OpenAICompatibleAdapter:
         started = time.perf_counter()
         request: dict[str, Any] = {"model": model_name, "messages": messages, "stream": False, **self.chat_options}
         if max_tokens is not None: request["max_tokens"] = max_tokens
-        if tools is not None: request["tools"] = tools
+        if tools is not None:
+            request["tools"] = tools
+            # Coding and infrastructure execution accept exactly one typed
+            # action per turn. Ask OpenAI-compatible providers not to emit a
+            # parallel batch; the platform still validates this independently.
+            request["parallel_tool_calls"] = False
         if tool_choice is not None: request["tool_choice"] = tool_choice
         response = await asyncio.to_thread(self._request, "/v1/chat/completions", request)
         choices = response.get("choices")
