@@ -174,11 +174,15 @@ class DelegationService:
             function("replace_text", "Replace one exact occurrence in an already-inspected existing file. The platform constructs and validates the unified patch.", {"type": "object", "additionalProperties": False, "required": ["path", "old_text", "new_text"], "properties": {"path": {"type": "string", "description": "Inspected workspace-relative existing file path."}, "old_text": {"type": "string", "description": "Exact text from the inspected file; it must occur exactly once.", "maxLength": 4000}, "new_text": {"type": "string", "description": "Exact bounded replacement text; no diff syntax.", "maxLength": 4000}}}),
         ]
 
-    @staticmethod
-    def _infrastructure_tools() -> list[dict[str, Any]]:
+    def _infrastructure_tools(self, environment_id: str) -> list[dict[str, Any]]:
         def fn(name: str, required: list[str], props: dict[str, Any]) -> dict[str, Any]:
             return {"type":"function","function":{"name":name,"description":"Perform only this bounded read-only infrastructure inspection.","parameters":{"type":"object","additionalProperties":False,"required":required,"properties":props}}}
-        return [fn("inspect_host", ["host_id"], {"host_id":{"type":"string","maxLength":120}}), fn("list_vms", [], {}), fn("inspect_vm", ["vm_id"], {"vm_id":{"type":"string","maxLength":120}}), fn("inspect_service", ["service_id"], {"service_id":{"type":"string","maxLength":120}})]
+        row = self.database.fetch_one("SELECT config_json FROM environment_targets WHERE id=?", (environment_id,))
+        try: config = json.loads(row["config_json"] or "{}") if row else {}
+        except json.JSONDecodeError: config = {}
+        allowed = config.get("allowed_resource_ids", []) if isinstance(config, dict) else []
+        allowed = [item for item in allowed[:50] if isinstance(item, str) and 0 < len(item) <= 120]
+        return [fn("inspect_host", ["host_id"], {"host_id":{"type":"string","maxLength":120}}), fn("list_vms", [], {}), fn("inspect_vm", ["vm_id"], {"vm_id":{"type":"string","enum":allowed}}), fn("inspect_service", ["service_id"], {"service_id":{"type":"string","maxLength":120}})]
 
     @staticmethod
     def _native_infrastructure_action(tool_calls: tuple[dict[str, Any], ...]) -> tuple[str, dict[str, Any]]:
@@ -188,6 +192,7 @@ class DelegationService:
         try: payload=json.loads(function["arguments"])
         except json.JSONDecodeError as exc: raise DelegationError("Infrastructure Agent returned malformed tool arguments") from exc
         required={"inspect_host":"host_id","inspect_vm":"vm_id","inspect_service":"service_id"}.get(function["name"])
+        if required == "vm_id" and isinstance(payload, dict) and isinstance(payload.get("vm_id"), int) and not isinstance(payload.get("vm_id"), bool): payload["vm_id"] = str(payload["vm_id"])
         if not isinstance(payload,dict) or (required is None and payload) or (required is not None and set(payload)!={required}) or (required is not None and (not isinstance(payload[required],str) or not payload[required])): raise DelegationError("Infrastructure Agent selected an invalid operation")
         return function["name"],payload
 
@@ -273,6 +278,17 @@ class DelegationService:
             feedback["content"] = str(output.get("content", ""))[:4000]
         elif operation == "apply_patch":
             feedback = {key: output.get(key) for key in ("files_changed", "check_first")}
+        elif operation in {"inspect_host", "list_vms", "inspect_vm", "inspect_service"}:
+            # Typed infrastructure results are already normalized by the
+            # worker adapter. Preserve a small scalar-only view for review.
+            def bounded(value: Any, depth: int = 0) -> Any:
+                if depth > 2: return None
+                if isinstance(value, str): return value[:240]
+                if isinstance(value, (int, float, bool)) or value is None: return value
+                if isinstance(value, dict): return {str(key)[:80]: bounded(item, depth + 1) for key, item in list(value.items())[:16]}
+                if isinstance(value, list): return [bounded(item, depth + 1) for item in value[:16]]
+                return None
+            feedback = bounded(output)
         else:
             feedback = {key: output.get(key) for key in ("target", "exit_code", "stdout_truncated", "stderr_truncated")}
             feedback["stdout"] = str(output.get("stdout", ""))[:1000]
@@ -309,7 +325,7 @@ class DelegationService:
             if model is None:
                 raise DelegationError("Delegated model not found for provider")
             for step in range(1, 4):
-                inference = await self.providers.chat(request.provider_id, model["name"], messages, max_tokens=256, tools=self._infrastructure_tools() if infrastructure else self._agent_tools(), tool_choice="auto")
+                inference = await self.providers.chat(request.provider_id, model["name"], messages, max_tokens=256, tools=self._infrastructure_tools(request.environment_id) if infrastructure else self._agent_tools(), tool_choice="auto")
                 if not inference.tool_calls:
                     if not trace:
                         raise DelegationError("Coding Agent returned no tool call")
@@ -330,6 +346,8 @@ class DelegationService:
                     if test_count >= 1:
                         raise DelegationError("Coding Agent exceeded run_tests limit")
                 execution = await self.workers.execute(ExecutionRequest(request.worker_id, request.environment_id, internal_operation, internal_payload, request.timeout_seconds))
+                if infrastructure and execution.status != "succeeded" and execution.error_summary == "VM is outside approved scope":
+                    rejection_diagnostic = {"code": "resource_out_of_scope", "operation": selected_operation, "resource_id": str(payload.get("vm_id", ""))[:120]}
                 trace.append({"step": step, "operation": selected_operation, "status": execution.status})
                 if execution.status != "succeeded":
                     result = execution

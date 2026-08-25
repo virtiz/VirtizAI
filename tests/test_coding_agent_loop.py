@@ -7,6 +7,15 @@ from virtizai_core.db import Database
 from virtizai_core.dev_tools import DevelopmentToolsExecutor
 from virtizai_core.jobs import JobManager
 from virtizai_core.orchestration import AgentWorkRequest, DelegationService
+from virtizai_core.workers import ExecutionResult
+
+
+def test_infrastructure_tool_feedback_preserves_bounded_normalized_result():
+    result = ExecutionResult("succeeded", {"id": "120", "state": "running", "host": "node-a", "nested": {"secret": "not-a-secret"}})
+    feedback = json.loads(DelegationService._tool_feedback("inspect_vm", result))
+    assert feedback["result"]["id"] == "120"
+    assert feedback["result"]["state"] == "running"
+    assert feedback["result"]["host"] == "node-a"
 from virtizai_core.registries import EnvironmentRegistry, WorkerRegistry
 from virtizai_core.workers import WorkerExecutionBoundary
 
