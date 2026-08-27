@@ -103,7 +103,19 @@ class DiscordGateway:
     def response_chunks(content: str, limit: int = 2000) -> list[str]:
         if not content:
             return []
-        return [content[i:i + limit] for i in range(0, len(content), limit)]
+        chunks = []
+        remaining = content
+        while len(remaining) > limit:
+            cut = max(remaining.rfind("\n\n", 0, limit + 1), remaining.rfind("\n", 0, limit + 1), remaining.rfind(" ", 0, limit + 1))
+            if cut <= 0:
+                cut = limit
+            else:
+                cut += 2 if remaining[cut:cut + 2] == "\n\n" else 1
+            chunks.append(remaining[:cut])
+            remaining = remaining[cut:]
+        if remaining:
+            chunks.append(remaining)
+        return chunks
 
     @staticmethod
     def _thread_cleanup_requested(text: str) -> bool:
@@ -578,7 +590,18 @@ class DiscordGateway:
                     await channel.send(chunk)
         except Exception as exc:
             await self._set_status("connected", type(exc).__name__)
-            _LOG.warning("Discord message handling failed: %s", type(exc).__name__)
+            _LOG.warning("Discord message handling failed: %s", type(exc).__name__, exc_info=True)
+            if isinstance(exc, LookupError):
+                content = "I could not find an eligible execution target for that request. Please try again later or use a different execution tier."
+            elif isinstance(exc, ConnectionError):
+                content = "The selected provider is currently unavailable. Please try again shortly."
+            else:
+                content = "Delegated execution failed before a response was available. Please try again shortly."
+            try:
+                async with self._send_lock:
+                    await self._send_direct(channel, content)
+            except Exception:
+                _LOG.warning("Discord failure response could not be sent", exc_info=True)
             return False
         return True
 

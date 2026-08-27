@@ -10,7 +10,7 @@ from typing import Any
 
 from .db import Database
 from .jobs import JobManager
-from .infra_policy import authorize, operation_policy, resource_scope
+from .infra_policy import authorize, cluster_read_authorized, operation_policy, resource_scope
 from .services import SessionService
 from .workers import ExecutionRequest, ExecutionResult, WorkerExecutionBoundary
 
@@ -146,8 +146,21 @@ class DelegationService:
         output = result.output if isinstance(result.output, dict) else {}
         final_summary = output.get("final_summary")
         if isinstance(final_summary, str) and final_summary.strip():
-            return final_summary[:300]
+            return final_summary
         return f"Delegated operation {result.status}"[:300]
+
+    @staticmethod
+    def _infrastructure_inventory_summary(resources: list[dict[str, Any]], objective: str) -> str:
+        count = len(resources)
+        request = objective.lower()
+        if not any(phrase in request for phrase in ("list", "show", "what are", "which ones", "names", "hosts")):
+            return f"You have {count} VM/LXC resources in total."
+        lines = [f"Live Proxmox inventory: {count} VM/LXC resources.", "VMID | name | type | state | host"]
+        for resource in resources:
+            raw_type = str(resource.get("resource_type") or "vm").lower()
+            resource_type = "LXC / container" if raw_type == "lxc" else "VM / QEMU" if raw_type in {"qemu", "vm"} else raw_type
+            lines.append(" | ".join(str(resource.get(key) or "") for key in ("id", "name")) + " | {} | {} | {}".format(resource_type, resource.get("state") or "", resource.get("host") or ""))
+        return "\n".join(lines)
 
     async def delegate(self, request: DelegatedWorkRequest) -> dict:
         session = self._validate(request)
@@ -441,16 +454,21 @@ class DelegationService:
         try: config = json.loads(row["config_json"] or "{}") if row else {}
         except json.JSONDecodeError: config = {}
         allowed = resource_scope(config, "inspect_vm") if isinstance(config, dict) else []
+        cluster_read = cluster_read_authorized(config, "inspect_vm") if isinstance(config, dict) else False
         try: caps = set(json.loads(row["capabilities_json"] or "[]")) if row else set()
         except json.JSONDecodeError: caps = set()
         worker = self.database.fetch_one("SELECT capabilities_json FROM workers WHERE id=?", (worker_id,)) if worker_id else None
         try: worker_caps = set(json.loads(worker["capabilities_json"] or "[]")) if worker else caps
         except json.JSONDecodeError: worker_caps = set()
-        definitions = [fn("inspect_host", ["host_id"], {"host_id":{"type":"string","maxLength":120}}), fn("list_vms", [], {}), fn("inspect_vm", ["vm_id"], {"vm_id":{"type":"string","enum":allowed}}), fn("inspect_service", ["service_id"], {"service_id":{"type":"string","maxLength":120}})]
+        definitions = []
+        for operation, required, props in (("inspect_host", ["host_id"], {"host_id":{"type":"string","maxLength":120}}), ("list_vms", [], {}), ("inspect_vm", ["vm_id"], {"vm_id":{"type":"string","maxLength":120}} if cluster_read else {"vm_id":{"type":"string","enum":allowed}}), ("inspect_service", ["service_id"], {"service_id":{"type":"string","maxLength":120}})):
+            if authorize(operation, worker_caps, caps, config if isinstance(config, dict) else {}).allowed:
+                definitions.append(fn(operation, required, props))
         for operation in ("start_vm", "restart_vm"):
             decision = authorize(operation, worker_caps, caps, config if isinstance(config, dict) else {})
-            if decision.allowed:
-                definitions.append(fn(operation, ["vm_id"], {"vm_id":{"type":"string","enum":resource_scope(config, operation)}}))
+            scope = resource_scope(config, operation)
+            if decision.allowed and scope:
+                definitions.append(fn(operation, ["vm_id"], {"vm_id":{"type":"string","enum":scope}}))
         return definitions
 
     @staticmethod
@@ -673,7 +691,7 @@ class DelegationService:
         if file_index:
             coding_context += " Available allowed files (bounded index): " + ", ".join(file_index) + "."
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": "You are the configured Infrastructure Agent. Use only one provided native typed function per turn. The platform, not you, authorizes risk. Never use shell, command, SSH, or unprovided operations." if infrastructure else coding_context},
+            {"role": "system", "content": "You are the configured Infrastructure Agent. Use only one provided native typed function per turn. The platform, not you, authorizes risk. Never use shell, command, SSH, or unprovided operations. When list_vms returns resources, state the exact number returned; never claim inventory details are unavailable when the tool succeeded." if infrastructure else coding_context},
             {"role": "user", "content": request.objective[:2000]},
         ]
         inspected: set[str] = set()
@@ -754,7 +772,11 @@ class DelegationService:
                             error_summary=mutation_recovery_required,
                         )
                         break
-                    final_summary = content[:300]
+                    final_summary = content if infrastructure else content[:300]
+                    if infrastructure and selected_operation == "list_vms" and trace:
+                        last_output = execution.output if isinstance(execution.output, dict) else {}
+                        resources = last_output.get("resources") if isinstance(last_output.get("resources"), list) else []
+                        final_summary = self._infrastructure_inventory_summary(resources, request.objective)
                     result = ExecutionResult("succeeded", {"trace": trace, "termination": "final_response", "final_summary": final_summary})
                     break
                 selected_operation, payload = self._native_infrastructure_action(inference.tool_calls) if infrastructure else self._native_agent_action(inference.tool_calls, offered_tools)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 import asyncio, json, time, urllib.parse, urllib.request
 from typing import Any
-from .infra_policy import authorize, operation_policy, resource_scope
+from .infra_policy import authorize, cluster_read_authorized, operation_policy, resource_scope
 from .workers import ExecutionRequest, ExecutionResult
 
 class InfrastructureToolsExecutor:
@@ -33,9 +33,9 @@ class InfrastructureToolsExecutor:
 
     @staticmethod
     def _normalize_vm(item: dict) -> dict[str, Any]:
-        return {"id":str(item.get("vmid")),"name":str(item.get("name", ""))[:160],"state":item.get("status"),"host":item.get("node"),"resource_type":"vm","cpu":item.get("maxcpu"),"memory":item.get("maxmem")}
+        return {"id":str(item.get("vmid")),"name":str(item.get("name", ""))[:160],"state":item.get("status"),"host":item.get("node"),"resource_type":str(item.get("type") or "vm"),"cpu":item.get("maxcpu"),"memory":item.get("maxmem")}
 
-    def _proxmox_vms(self, endpoint: str, token_id: str, token: str, config: dict, allowed: list[str]) -> list[dict[str, Any]]:
+    def _proxmox_vms(self, endpoint: str, token_id: str, token: str, config: dict, allowed: list[str], cluster_read: bool = False) -> list[dict[str, Any]]:
         node = config.get("proxmox_node")
         if isinstance(node, str) and node:
             safe_node = urllib.parse.quote(node, safe="")
@@ -46,7 +46,7 @@ class InfrastructureToolsExecutor:
                     values.append(self._normalize_vm({**data, "vmid": vm_id, "node": node}))
             return values
         data = self._request(endpoint, token_id, token, "/api2/json/cluster/resources?type=vm")
-        return [self._normalize_vm(item) for item in (data if isinstance(data, list) else []) if isinstance(item, dict) and str(item.get("vmid")) in allowed][:50]
+        return [self._normalize_vm(item) for item in (data if isinstance(data, list) else []) if isinstance(item, dict) and (cluster_read or str(item.get("vmid")) in allowed)][:50]
 
     def _proxmox(self, request: ExecutionRequest, environment: dict, config: dict) -> ExecutionResult:
         reference, endpoint = environment.get("credential_ref"), environment.get("address")
@@ -56,7 +56,8 @@ class InfrastructureToolsExecutor:
         if not isinstance(token_id,str) or not token_id: return self._error("credential_unavailable")
         try:
             token=self.secret_store.get(reference); allowed=resource_scope(config, request.operation)
-            normalized=self._proxmox_vms(endpoint, token_id, token, config, allowed)
+            cluster_read = cluster_read_authorized(config, request.operation)
+            normalized=self._proxmox_vms(endpoint, token_id, token, config, allowed, cluster_read)
             if request.operation == "inspect_host":
                 host_id=request.payload.get("host_id"); data=self._request(endpoint,token_id,token,f"/api2/json/nodes/{urllib.parse.quote(str(host_id),safe='')}/status")
                 return ExecutionResult("succeeded",{"id":host_id,"platform":"proxmox","state":"online"} if isinstance(data,dict) else {},None if isinstance(data,dict) else "adapter_invalid_data")
@@ -95,8 +96,10 @@ class InfrastructureToolsExecutor:
         config=self._config(environment); decision=authorize(request.operation,worker_caps,environment_caps,config)
         if not decision.allowed: return self._error(decision.code or "operation_not_allowed")
         allowed=resource_scope(config, request.operation)
-        if request.operation in {"inspect_vm","start_vm","restart_vm"} and (not isinstance(allowed,list) or request.payload.get("vm_id") not in allowed): return self._error("resource_out_of_scope")
+        cluster_read = cluster_read_authorized(config, request.operation)
+        if request.operation in {"inspect_vm","start_vm","restart_vm"} and request.payload.get("vm_id") not in allowed and not (request.operation == "inspect_vm" and cluster_read): return self._error("resource_out_of_scope")
         if config.get("adapter")=="proxmox": return self._evidence(await asyncio.to_thread(self._proxmox,request,environment,config), decision.risk.value, decision.authorization_source or "", "proxmox")
+        if cluster_read: return self._error("adapter_not_configured")
         inventory=config.get("inventory")
         if not isinstance(inventory,dict): return self._error("adapter_not_configured")
         if not isinstance(allowed,list) or not all(isinstance(item,str) for item in allowed): return self._error("resource_out_of_scope")

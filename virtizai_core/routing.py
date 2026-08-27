@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from .db import Database
@@ -111,9 +111,11 @@ class RoutingEngine:
             ))
         return STRATEGIES.get(strategy, STRATEGIES["priority"]).order(routes)
 
-    def capability_selection(self, role_id: str, requirements: TaskRequirements | None = None) -> dict:
+    def capability_selection(self, role_id: str, requirements: TaskRequirements | None = None, execution_tier: str | None = None) -> dict:
         """Select from the route's explicit targets with bounded reasons."""
         requirements = requirements or requirements_for(role_id)
+        if execution_tier in {"local", "cloud"}:
+            requirements = replace(requirements, prefer_local=(execution_tier == "local"))
         rows = self.database.fetch_all("""SELECT r.id route_id,r.priority,r.policy_json,rt.ordinal,rt.enabled target_enabled,
             rt.provider_id,rt.model_id,rt.conditions_json,p.enabled provider_enabled,p.health_status,m.name model_name,m.status model_status,
             m.capabilities_json,m.user_overrides_json,m.expected_latency_ms,m.first_token_latency_ms,m.relative_cost,m.locality
@@ -125,7 +127,9 @@ class RoutingEngine:
             try: policy = json.loads(row.get("policy_json") or "{}")
             except json.JSONDecodeError: policy = {}
             enforce = bool(isinstance(policy, dict) and isinstance(policy.get("capability_routing"), dict) and policy["capability_routing"].get("enforce", True))
-            if not row["target_enabled"]: reason = "route_target_disabled"
+            if execution_tier == "local" and row["locality"] != "local": reason = "execution_tier_mismatch"
+            elif execution_tier == "cloud" and row["locality"] == "local": reason = "execution_tier_mismatch"
+            elif not row["target_enabled"]: reason = "route_target_disabled"
             elif not row["provider_enabled"]: reason = "provider_disabled"
             elif enforce and row["health_status"] not in {"healthy", "degraded"}: reason = "provider_unhealthy"
             elif enforce and row["model_status"] not in {"warm", "cold", "loading", "available", "unknown"}: reason = "model_disabled"
@@ -145,7 +149,7 @@ class RoutingEngine:
             eligible.append(entry)
         eligible.sort(key=lambda item: (item["priority"], 0 if requirements.prefer_local and item["locality"] == "local" else 1, item["latency"] if requirements.latency_preference == "low" and item["latency"] is not None else 1e12, item["cost"] if requirements.cost_preference == "low" and item["cost"] is not None else 1e12, item["ordinal"], item["provider_id"], item["model_id"]))
         selected = eligible[0] if eligible else None
-        return {"requirements":requirements.as_dict(),"candidates":[{"provider_id":x["provider_id"],"model_id":x["model_id"]} for x in rows[:32]],"eligible":eligible,"excluded":excluded,"selected":selected,"selection_reason":"capability_eligible_ranked" if selected and selected["capability_enforced"] else ("legacy_fixed_target" if selected else "no_eligible_target"),"fallback_candidates":eligible[1:2]}
+        return {"execution_tier": execution_tier or "automatic", "requirements":requirements.as_dict(),"candidates":[{"provider_id":x["provider_id"],"model_id":x["model_id"]} for x in rows[:32]],"eligible":eligible,"excluded":excluded,"selected":selected,"selection_reason":"capability_eligible_ranked" if selected and selected["capability_enforced"] else ("legacy_fixed_target" if selected else "no_eligible_target"),"fallback_candidates":eligible[1:2]}
 
     def warnings(self, routes: list[EligibleRoute]) -> list[str]:
         providers = [route.provider_id for route in routes]

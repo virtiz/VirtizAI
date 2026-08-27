@@ -8,7 +8,7 @@ from .db import Database
 from .services import CoreService, SecretaryResponse
 from .orchestration import AgentWorkRequest, DelegationService
 from .policy import CommunicationPolicy, normalize_policy
-from .delegation_policy import DelegationPolicyEngine
+from .delegation_policy import DelegationDecision, DelegationPolicyEngine
 from .project_lead import ProjectLeadService
 from .routing import RoutingEngine
 
@@ -65,6 +65,50 @@ class InterfaceService:
         self.database.execute("INSERT INTO interface_sessions(interface_type, external_session_key, session_id, user_id) VALUES (?, ?, ?, ?)", (request.interface_type, key, session_id, user_id))
         return session_id
 
+    @staticmethod
+    def _infrastructure_follow_up(content: str) -> bool:
+        """Recognize only unambiguous references to a prior live inventory."""
+        normalized = " ".join(content.lower().strip().rstrip("?!.").split())
+        return normalized in {
+            "list them", "list them for me", "show them", "what are they",
+            "which ones", "which ones are running", "give me their names",
+            "what hosts are they on",
+        }
+
+    def _has_successful_infrastructure_read(self, session_id: str) -> bool:
+        """Require durable same-session list_vms evidence before inheriting context."""
+        messages = self.database.fetch_all(
+            "SELECT metadata_json FROM messages WHERE session_id=? AND role='assistant' "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 12",
+            (session_id,),
+        )
+        for message in messages:
+            try:
+                metadata = json.loads(message["metadata_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(metadata, dict) or metadata.get("role_id") != "role-infrastructure" or metadata.get("status") != "succeeded":
+                continue
+            job_id = metadata.get("job_id")
+            if not isinstance(job_id, str) or not job_id:
+                continue
+            job = self.database.fetch_one("SELECT status,result_json FROM jobs WHERE id=? AND session_id=?", (job_id, session_id))
+            if job is None or job["status"] != "succeeded":
+                continue
+            try:
+                result = json.loads(job["result_json"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            trace = result.get("trace") if isinstance(result, dict) else None
+            if isinstance(trace, list) and any(isinstance(item, dict) and item.get("operation") == "list_vms" and item.get("status") == "succeeded" for item in trace):
+                return True
+        return False
+
+    def _unresolved_infrastructure_follow_up(self, session_id: str) -> SecretaryResponse:
+        content = "I need a successful live infrastructure inventory in this conversation before I can list or compare those resources. Please ask me to list your VMs or containers first."
+        message_id = self.core.sessions.add_message(session_id, "assistant", content, {"execution_type": "infrastructure_follow_up_clarification"})
+        return SecretaryResponse(str(uuid.uuid4()), session_id, message_id, content, None, None, None, task_class="secretary")
+
     async def handle(self, request: InterfaceRequest) -> tuple[str, SecretaryResponse]:
         user_id = self.resolve_user(request.interface_type, request.external_subject, request.display_name)
         session_id = self.resolve_session(request)
@@ -73,11 +117,16 @@ class InterfaceService:
         inherited = dict(override or base) if (override or base) else None
         policy = normalize_policy(request.response_verbosity, request.execution_updates, request.tool_details, CommunicationPolicy(**inherited) if inherited else None)
         decision = await self.delegation_policy.decide(request.content)
+        if self._infrastructure_follow_up(request.content):
+            if self._has_successful_infrastructure_read(session_id):
+                decision = DelegationDecision("delegate", "role-infrastructure", 1.0, "bounded_infrastructure_read", "session-context", "list my VM/container infrastructure resources")
+            else:
+                return session_id, self._unresolved_infrastructure_follow_up(session_id)
         if decision.decision == "delegate" and self.delegation is not None:
             if decision.role_id == "role-project-lead":
                 session_id, response = await self.project_for_session(request, decision.objective)
             else:
-                session_id, response = await self.delegate_for_session(request, decision.role_id or "", decision.objective)
+                session_id, response = await self.delegate_for_session(request, decision.role_id or "", decision.objective, decision)
             self.database.execute("INSERT INTO interface_events(interface_type,user_id,session_id,event_type,metadata_json) VALUES (?,?,?,?,?)", (request.interface_type, user_id, session_id, "delegation_decision", json.dumps(decision.metadata())))
             return session_id, response
         response = await self.core.handle_message(
@@ -88,10 +137,11 @@ class InterfaceService:
         self.database.execute("INSERT INTO interface_events(interface_type, user_id, session_id, event_type, metadata_json) VALUES (?, ?, ?, 'message', ?)", (request.interface_type, user_id, session_id, json.dumps({"request_id": response.request_id})))
         return session_id, response
 
-    def _delegated_execution(self, role_id: str) -> dict:
-        decision = RoutingEngine(self.database).capability_selection(role_id)
-        selected = decision.get("selected")
-        if selected is None: raise LookupError("No capability-eligible delegated execution target is configured")
+    def _delegated_execution(self, role_id: str, delegation_decision = None) -> dict:
+        routing_decision = RoutingEngine(self.database).capability_selection(role_id, execution_tier=getattr(delegation_decision, "execution_tier", None))
+        selected = routing_decision.get("selected")
+        if selected is None:
+            raise LookupError("No capability-eligible delegated execution target is configured")
         row = self.database.fetch_one("SELECT policy_json FROM routes WHERE id=?", (selected["route_id"],))
         if row is None:
             raise LookupError("No delegated execution route is configured for agent")
@@ -102,9 +152,29 @@ class InterfaceService:
         execution = policy.get("delegated_execution") if isinstance(policy, dict) else None
         if not isinstance(execution, dict) or not all(isinstance(execution.get(key), str) and execution[key] for key in ("worker_id", "environment_id")):
             raise LookupError("Delegated execution route is incomplete")
-        return {"provider_id": selected["provider_id"], "model_id": selected["model_id"], "worker_id": selected.get("worker_id") or execution["worker_id"], "environment_id": selected.get("environment_id") or execution["environment_id"], "execution_plan": selected.get("execution_plan", "native_tool_coding"), "routing_decision": decision, "fallback": decision.get("fallback_candidates", [])[:1]}
+        # Intent-aware routing: use delegation decision reason_code to select execution profile
+        intent_reason_code = getattr(delegation_decision, "reason_code", None) if delegation_decision else None
+        selected_execution = dict(
+            provider_id=selected["provider_id"],
+            model_id=selected["model_id"],
+            worker_id=selected.get("worker_id") or execution["worker_id"],
+            environment_id=selected.get("environment_id") or execution["environment_id"],
+            execution_plan=selected.get("execution_plan", "native_tool_coding"),
+            routing_decision=routing_decision,
+            fallback=routing_decision.get("fallback_candidates", [])[:1],
+        )
+        # Try to resolve execution profile based on intent
+        execution_profiles = policy.get("delegated_execution_profiles") if isinstance(policy, dict) else None
+        if isinstance(execution_profiles, dict) and intent_reason_code in execution_profiles:
+            profile = execution_profiles[intent_reason_code]
+            if isinstance(profile, dict):
+                return {
+                    **selected_execution,
+                    **profile,
+                }
+        return selected_execution
 
-    async def delegate_for_session(self, request: InterfaceRequest, role_id: str, objective: str) -> tuple[str, SecretaryResponse]:
+    async def delegate_for_session(self, request: InterfaceRequest, role_id: str, objective: str, delegation_decision = None) -> tuple[str, SecretaryResponse]:
         if self.delegation is None:
             raise RuntimeError("Generic delegation is not configured")
         user_id = self.resolve_user(request.interface_type, request.external_subject, request.display_name)
@@ -112,8 +182,8 @@ class InterfaceService:
         role = self.database.fetch_one("SELECT id,enabled FROM roles WHERE id=?", (role_id,))
         if role is None or not role["enabled"]:
             raise LookupError("Delegated agent is unavailable")
-        selection = self._delegated_execution(role_id)
-        job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, selection["provider_id"], selection["model_id"], selection["worker_id"], selection["environment_id"], objective, context={"routing_decision": selection["routing_decision"], "execution_plan": selection["execution_plan"]}))
+        selection = self._delegated_execution(role_id, delegation_decision)
+        job = await self.delegation.delegate_agent(AgentWorkRequest(session_id, role_id, selection["provider_id"], selection["model_id"], selection["worker_id"], selection["environment_id"], objective, context={"routing_decision": selection["routing_decision"], "execution_plan": selection["execution_plan"], "execution_tier": getattr(delegation_decision, "execution_tier", None) or "automatic"}))
         first = json.loads(job.get("result_json") or "{}")
         trace = first.get("trace") if isinstance(first.get("trace"), list) else []
         side_effect_state = DelegationService.side_effect_state(trace)
@@ -150,11 +220,11 @@ class InterfaceService:
         return session_id, response
 
     def _lead_execution(self, role_id: str) -> dict:
-        decision = RoutingEngine(self.database).capability_selection(role_id)
-        row = decision.get("selected")
+        routing_decision = RoutingEngine(self.database).capability_selection(role_id)
+        row = routing_decision.get("selected")
         if row is None:
             raise LookupError("No Project Lead route is configured")
-        return {"provider_id": row["provider_id"], "model_id": row["model_id"], "routing_decision": decision}
+        return {"provider_id": row["provider_id"], "model_id": row["model_id"], "routing_decision": routing_decision}
 
     def history(self, interface_type: str, external_subject: str, session_id: str | None = None) -> list[dict]:
         user_id = self.resolve_user(interface_type, external_subject)

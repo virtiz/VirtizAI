@@ -51,12 +51,18 @@ def operation_policy(operation: str) -> InfrastructureOperationPolicy | None:
 
 
 def resource_scope(config: dict[str, Any], operation: str) -> list[str]:
-    """Return a bounded operation-specific scope, falling back to read scope."""
+    """Return a bounded configured scope; an absent scope is never a wildcard."""
     scoped = config.get("operation_resource_ids", {})
     values = scoped.get(operation) if isinstance(scoped, dict) else None
     if values is None:
         values = config.get("allowed_resource_ids", [])
     return [value for value in values[:50] if isinstance(value, str) and 0 < len(value) <= 120] if isinstance(values, list) else []
+
+
+def cluster_read_authorized(config: dict[str, Any], operation: str) -> bool:
+    """Whether this specific operation has explicit, read-only cluster scope."""
+    policy = operation_policy(operation)
+    return bool(policy is not None and policy.risk is InfrastructureRisk.READ and config.get("read_scope") == "cluster")
 
 
 def authorize(operation: str, worker_capabilities: set[str], environment_capabilities: set[str], config: dict[str, Any]) -> AuthorizationDecision:
@@ -68,7 +74,13 @@ def authorize(operation: str, worker_capabilities: set[str], environment_capabil
     if policy.risk is InfrastructureRisk.DESTRUCTIVE:
         return AuthorizationDecision(False, "destructive_operation_disabled", policy.risk, None)
     if policy.risk is InfrastructureRisk.READ:
+        if cluster_read_authorized(config, operation):
+            return AuthorizationDecision(True, None, policy.risk, "cluster_read_policy")
+        if not resource_scope(config, operation):
+            return AuthorizationDecision(False, "resource_scope_unconfigured", policy.risk, None)
         return AuthorizationDecision(True, None, policy.risk, "read_policy")
+    if not resource_scope(config, operation):
+        return AuthorizationDecision(False, "resource_scope_unconfigured", policy.risk, None)
     risks = config.get("allowed_risk_classes", [])
     if not isinstance(risks, list) or policy.risk.value not in risks:
         return AuthorizationDecision(False, "risk_not_authorized", policy.risk, None)

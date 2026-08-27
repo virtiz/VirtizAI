@@ -70,7 +70,7 @@ async def test_gateway_uses_shared_adapter_session_and_sends_chunks(tmp_path: Pa
     class Adapter:
         async def handle_message(self, user_id, content, session_key=None, session_id=None, display_name="Discord user"):
             calls.append((user_id, content, session_key, display_name))
-            return DiscordReply("reply", "session-1", {})
+            return DiscordReply("x" * 4001, "session-1", {})
     class Channel:
         def __init__(self): self.sent=[]
         async def send(self, value): self.sent.append(value)
@@ -85,7 +85,7 @@ async def test_gateway_uses_shared_adapter_session_and_sends_chunks(tmp_path: Pa
     gateway = DiscordGateway(Adapter(), db, FileSecretStore(tmp_path / "secrets.json"))
     assert await gateway.handle_message(message) is True
     assert calls == [("42", "hello", "guild:7:channel:0:user:42", "Owner")]
-    assert message.channel.sent == ["reply"]
+    assert message.channel.sent == ["x" * 2000, "x" * 2000, "x"]
 
 
 @pytest.mark.asyncio
@@ -461,3 +461,10 @@ async def test_gateway_connected_after_persisted_disconnect_is_not_initially_sup
     assert latest["notification_status"] == "delivered"
 
     db.close()
+
+def test_gateway_chunking_preserves_complete_long_content_in_order():
+    content = ("alpha " * 410) + "\n" + ("beta " * 410) + "omega"
+    chunks = DiscordGateway.response_chunks(content)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 2000 for chunk in chunks)
+    assert "".join(chunks) == content

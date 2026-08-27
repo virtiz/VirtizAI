@@ -55,3 +55,49 @@ def test_proxmox_timeout_never_reports_success(tmp_path, monkeypatch):
   if (args[4] if len(args)>4 else kwargs.get('method'))=='POST': return 'UPID:unit'
   return {"status":"running"}
  executor._request=request;monkeypatch.setattr('virtizai_core.infra_tools.time.sleep',lambda _:None);b=WorkerExecutionBoundary(db);b.register(executor);assert run(b,'start_vm',{'vm_id':'120'}).error_summary=='postcondition_timeout';db.close()
+
+def test_explicit_cluster_read_is_read_only_and_missing_scope_fails_closed(tmp_path):
+    from virtizai_core.infra_policy import cluster_read_authorized
+    caps = set(READ)
+    cluster = {"read_scope": "cluster"}
+    assert cluster_read_authorized(cluster, "list_vms")
+    assert cluster_read_authorized(cluster, "inspect_vm")
+    assert authorize("list_vms", caps, caps, cluster).allowed
+    assert authorize("inspect_vm", caps, caps, cluster).allowed
+    assert not authorize("start_vm", caps, caps, cluster).allowed
+    assert not authorize("restart_vm", caps, caps, cluster).allowed
+    assert not authorize("list_vms", caps, caps, {}).allowed
+    assert not authorize("list_vms", caps, caps, {"allowed_resource_ids": []}).allowed
+
+
+def test_cluster_read_dynamic_inspection_and_mutation_scope_remain_bounded(tmp_path, monkeypatch):
+    class Secrets:
+        def configured(self, ref): return True
+        def get(self, ref): return "secret"
+    db, boundary = setup(tmp_path, READ, READ, {"adapter": "proxmox", "api_token_id": "id", "read_scope": "cluster"})
+    db.execute("UPDATE environment_targets SET address=?, credential_ref=? WHERE id=\x27e\x27", ("https://unit.invalid", "ref"))
+    executor = InfrastructureToolsExecutor(Secrets())
+    calls = []
+    def request(endpoint, token_id, token, path, method="GET"):
+        calls.append(path)
+        if "cluster/resources" in path:
+            return [{"vmid": "321", "name": "dynamic", "status": "running", "node": "pve01"}]
+        raise AssertionError(path)
+    monkeypatch.setattr(executor, "_request", request)
+    boundary = WorkerExecutionBoundary(db); boundary.register(executor)
+    result = run(boundary, "inspect_vm", {"vm_id": "321"})
+    assert result.status == "succeeded" and result.output["id"] == "321"
+    assert any("/api2/json/cluster/resources?type=vm" in call for call in calls)
+    assert run(boundary, "start_vm", {"vm_id": "321"}).error_summary == "capability_missing"
+    db.close()
+
+def test_live_inventory_presentation_uses_tool_evidence_not_model_claims():
+    from virtizai_core.orchestration import DelegationService
+    response = DelegationService._infrastructure_inventory_summary([
+        {"id":"101", "name":"actual-lxc", "resource_type":"lxc", "state":"running", "host":"pve01"},
+        {"id":"102", "name":"actual-vm", "resource_type":"qemu", "state":"stopped", "host":"pve02"},
+    ], "list my VM/container infrastructure resources")
+    assert "101 | actual-lxc | LXC / container | running | pve01" in response
+    assert "102 | actual-vm | VM / QEMU | stopped | pve02" in response
+    assert "Windows Server" not in response and "Hyper-V" not in response and "Ubuntu" not in response
+    assert len(response) > 100
