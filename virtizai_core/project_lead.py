@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .orchestration import AgentWorkRequest, DelegationService
+from .project_assignments import ProjectAssignmentService
+from .workers import ExecutionRequest
 
 
 @dataclass(frozen=True)
@@ -131,7 +133,30 @@ class ProjectLeadService:
         trace = raw.get("trace") if isinstance(raw.get("trace"), list) else output.get("trace", [])
         return {"status": job.get("status"), "operations": [{"operation": t.get("operation"), "status": t.get("status")} for t in trace[:3] if isinstance(t, dict)], "summary": str(output.get("final_summary") or job.get("result_summary") or job.get("error_summary") or "")[:600], "rejection_code": (raw.get("rejection_diagnostic") or {}).get("rejection_code") if isinstance(raw.get("rejection_diagnostic"), dict) else None}
 
-    async def run(self, session_id: str, objective: str, selection: dict) -> dict:
+    async def run(self, session_id: str, objective: str, selection: dict, manager: dict | None = None, user_id: str | None = None, interface_type: str | None = None) -> dict:
+        """Keep legacy Project Lead execution compatible; PM callers opt into planning."""
+        if manager is None or user_id is None or interface_type is None:
+            return await self.execute_phase_2b(session_id, objective, selection)
+        project_id = self._create(session_id, objective, selection)
+        assignment = ProjectAssignmentService(self.database).assign(
+            project_id, actor_user_id=user_id, source_interface=interface_type,
+            preferred_project_manager_id=manager["id"],
+        )
+        assignment_id = assignment.id
+        result = await self.delegation.workers.execute(ExecutionRequest(selection["worker_id"], selection["environment_id"], "managed_planning", {"role_id":"role-project-lead","objective":objective}))
+        if result.status != "succeeded":
+            self.database.execute("UPDATE projects SET status='blocked',blocker_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (str(result.error_summary or "Project planning failed")[:600], project_id))
+            return self.get(project_id) or {"id":project_id,"status":"blocked"}
+        plan = result.output.get("plan") if isinstance(result.output, dict) else None
+        plan_id = str(uuid.uuid4())
+        self.database.execute("INSERT INTO project_plans(id,project_id,assignment_id,plan_json,provider_id,model_id,worker_id,environment_target_id) VALUES(?,?,?,?,?,?,?,?)", (plan_id,project_id,assignment_id,json.dumps(plan,separators=(",",":")),selection["provider_id"],selection["model_id"],selection["worker_id"],selection["environment_id"]))
+        self.database.execute("UPDATE projects SET status='planned',completion_summary=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", (str(plan["summary"])[:1000],project_id))
+        self.database.execute("UPDATE project_assignments SET status='planned',updated_at=CURRENT_TIMESTAMP WHERE id=?", (assignment_id,))
+        self.database.execute("INSERT INTO project_assignment_audit(id,assignment_id,action,actor_user_id,metadata_json) VALUES(?,?,'plan_proposed',?,?)", (str(uuid.uuid4()),assignment_id,user_id,json.dumps({"plan_id":plan_id,"execution_contract":"managed_planning","sandbox":"read-only"})))
+        return self.get(project_id) or {"id":project_id,"status":"planned"}
+
+    async def execute_phase_2b(self, session_id: str, objective: str, selection: dict) -> dict:
+        """Unrouted legacy implementation; Phase 2A never calls this method."""
         project_id = self._create(session_id, objective, selection)
         try:
             plan_response = await self._infer(project_id, selection, [
@@ -198,4 +223,9 @@ class ProjectLeadService:
             return None
         result = dict(project)
         result["milestones"] = [dict(row) for row in self.database.fetch_all("SELECT * FROM project_milestones WHERE project_id=? ORDER BY ordinal", (project_id,))]
+        assignment = self.database.fetch_one("SELECT a.*,pm.name project_manager_name FROM project_assignments a JOIN project_managers pm ON pm.id=a.project_manager_id WHERE a.project_id=?", (project_id,))
+        result["assignment"] = dict(assignment) if assignment else None
+        result["plans"] = []
+        for row in self.database.fetch_all("SELECT * FROM project_plans WHERE project_id=? ORDER BY version", (project_id,)):
+            item = dict(row); item["plan"] = json.loads(item.pop("plan_json")); result["plans"].append(item)
         return result

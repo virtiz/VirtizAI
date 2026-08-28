@@ -6,6 +6,8 @@ import os
 import re
 from dataclasses import dataclass, replace
 
+from .work_intake import WorkIntakeClassifier
+
 
 @dataclass(frozen=True)
 class DelegationDecision:
@@ -25,6 +27,7 @@ class DelegationDecision:
 class DelegationPolicyEngine:
     def __init__(self, database, providers=None, secretary_candidates=None, high_confidence: float | None = None) -> None:
         self.database, self.providers, self.secretary_candidates = database, providers, secretary_candidates
+        self.work_intake = WorkIntakeClassifier()
         self.high_confidence = max(0.0, min(1.0, high_confidence if high_confidence is not None else float(os.environ.get("VIRTIZAI_DELEGATION_HIGH_CONFIDENCE", "0.85"))))
 
     def deterministic(self, content: str) -> DelegationDecision | None:
@@ -84,6 +87,9 @@ class DelegationPolicyEngine:
                 "deterministic",
                 text,
             )
+        intake = self.work_intake.classify(text)
+        if intake.needs_project_manager and not intake.followup:
+            return DelegationDecision("delegate", "role-project-lead", 1.0, "automatic_project_management", "work-intake", text, execution_tier="cloud")
         multi_step = re.search(r"\b(plan|manage|milestone|multi-step|multiple files|end-to-end|implementation and validation)\b", lowered)
         engineering = re.search(r"\b(implement|build|refactor|feature|release|code|repository|tests?)\b", lowered)
         delivery = re.search(r"\b(add|build|implement|refactor|make)\b.*\b(page|dashboard|feature|integration|workflow|component|improvement)\b", lowered)

@@ -41,7 +41,7 @@ from .retention import RetentionService
 from .interfaces import InterfaceRequest, InterfaceService
 from .discord import DiscordAdapter
 from .discord_gateway import DiscordGateway
-from .workers import CodexWorker, ManagedCodingWorkerExecutor, WorkerExecutionBoundary
+from .workers import CodexWorker, ManagedCodingWorkerExecutor, ManagedPlanningWorkerExecutor, WorkerExecutionBoundary
 from .dev_tools import DevelopmentToolsExecutor
 from .infra_tools import InfrastructureToolsExecutor
 from .orchestration import DelegationService
@@ -348,6 +348,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.worker_execution = WorkerExecutionBoundary(database)
     app.state.worker_execution.register(DevelopmentToolsExecutor())
     app.state.worker_execution.register(ManagedCodingWorkerExecutor())
+    app.state.worker_execution.register(ManagedPlanningWorkerExecutor())
     app.state.worker_execution.register(InfrastructureToolsExecutor(app.state.secrets if hasattr(app.state, "secrets") else None))
     jobs.register_handler("codex_worker", codex_worker.run)
     core = CoreService(database, telemetry, jobs, providers, codex_worker, app.state.events)
@@ -934,7 +935,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
         row = database.fetch_one("SELECT id,capabilities_json,user_overrides_json FROM models WHERE id=?", (model_id,))
         if row is None: raise HTTPException(status_code=404, detail="Model not found")
         from .capability_routing import capability_state
-        names = ("chat", "native_tool_calls", "structured_output", "reasoning", "coding", "long_context", "local", "remote")
+        names = ("chat", "native_tool_calls", "structured_output", "reasoning", "coding", "managed_coding_worker", "managed_planning_worker", "long_context", "local", "remote")
         return {"model_id": row["id"], "capabilities": {name: capability_state(dict(row), name) for name in names}}
 
     @app.get("/v1/models/{model_id}/residency")

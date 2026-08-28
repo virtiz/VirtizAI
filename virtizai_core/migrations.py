@@ -774,6 +774,125 @@ def migration_19(connection: sqlite3.Connection) -> None:
     connection.execute("INSERT INTO roles(id,name,purpose,requirements_json) VALUES ('role-infrastructure','infrastructure','Typed read-only infrastructure operations','{\"infrastructure\":true}') ON CONFLICT(id) DO NOTHING")
 
 
+def migration_20(connection: sqlite3.Connection) -> None:
+    """Persist named project managers, assignment history, and Phase 2A plans."""
+    connection.executescript("""
+        CREATE TABLE IF NOT EXISTS project_managers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            role_id TEXT NOT NULL REFERENCES roles(id),
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS project_assignments (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL UNIQUE REFERENCES projects(id) ON DELETE CASCADE,
+            project_manager_id TEXT NOT NULL REFERENCES project_managers(id),
+            assigned_by_user_id TEXT REFERENCES users(id),
+            source_interface TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'assigned',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS project_assignment_audit (
+            id TEXT PRIMARY KEY,
+            assignment_id TEXT NOT NULL REFERENCES project_assignments(id) ON DELETE CASCADE,
+            action TEXT NOT NULL,
+            actor_user_id TEXT REFERENCES users(id),
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS project_plans (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            assignment_id TEXT NOT NULL REFERENCES project_assignments(id),
+            version INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'proposed',
+            plan_json TEXT NOT NULL,
+            execution_contract TEXT NOT NULL DEFAULT 'managed_planning',
+            sandbox TEXT NOT NULL DEFAULT 'read-only',
+            provider_id TEXT REFERENCES providers(id),
+            model_id TEXT REFERENCES models(id),
+            worker_id TEXT REFERENCES workers(id),
+            environment_target_id TEXT REFERENCES environment_targets(id),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(project_id, version)
+        );
+        CREATE INDEX IF NOT EXISTS idx_project_assignments_pm_status
+            ON project_assignments(project_manager_id, status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_project_plans_project_created
+            ON project_plans(project_id, created_at);
+    """)
+    project_columns = {row[1] for row in connection.execute("PRAGMA table_info(projects)")}
+    if "assigned_project_manager_id" not in project_columns:
+        connection.execute(
+            "ALTER TABLE projects ADD COLUMN assigned_project_manager_id TEXT REFERENCES project_managers(id)"
+        )
+    if "project_manager_assigned_at" not in project_columns:
+        connection.execute("ALTER TABLE projects ADD COLUMN project_manager_assigned_at TEXT")
+    for slug, name in (("sarah", "Sarah"), ("michael", "Michael"),
+                       ("emily", "Emily"), ("daniel", "Daniel"),
+                       ("rachel", "Rachel")):
+        connection.execute(
+            "INSERT INTO project_managers(id,name,role_id) VALUES(?,?,'role-project-lead') ON CONFLICT(id) DO NOTHING",
+            (f"pm-{slug}", name),
+        )
+
+
+def migration_21(connection: sqlite3.Connection) -> None:
+    """Add the sanitized, read-only homelab facts catalog."""
+    connection.executescript("""
+        CREATE TABLE IF NOT EXISTS homelab_entities (
+            id TEXT PRIMARY KEY,
+            canonical_name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            entity_type TEXT NOT NULL DEFAULT 'resource',
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active', 'inactive', 'unknown')),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS homelab_aliases (
+            alias TEXT PRIMARY KEY COLLATE NOCASE,
+            entity_id TEXT NOT NULL REFERENCES homelab_entities(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS homelab_provenance (
+            id TEXT PRIMARY KEY,
+            source_name TEXT NOT NULL,
+            source_line INTEGER,
+            source_digest TEXT NOT NULL,
+            imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(source_name, source_line, source_digest)
+        );
+        CREATE TABLE IF NOT EXISTS homelab_facts (
+            id TEXT PRIMARY KEY,
+            entity_id TEXT NOT NULL REFERENCES homelab_entities(id) ON DELETE CASCADE,
+            property TEXT NOT NULL COLLATE NOCASE,
+            value TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'asserted'
+                CHECK(status IN ('asserted', 'verified', 'stale', 'unknown')),
+            provenance_id TEXT NOT NULL REFERENCES homelab_provenance(id),
+            verified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(entity_id, property, value, provenance_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_homelab_alias_entity
+            ON homelab_aliases(entity_id);
+        CREATE INDEX IF NOT EXISTS idx_homelab_fact_entity_property
+            ON homelab_facts(entity_id, property, status);
+    """)
+
+
+def migration_22(connection: sqlite3.Connection) -> None:
+    """Add the homelab fact verification timestamp to existing catalogs."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(homelab_facts)")}
+    if "verified_at" not in columns:
+        connection.execute(
+            "ALTER TABLE homelab_facts "
+            "ADD COLUMN verified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        )
+
+
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (1, migration_1),
     (2, migration_2),
@@ -794,6 +913,9 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (17, migration_17),
     (18, migration_18),
     (19, migration_19),
+    (20, migration_20),
+    (21, migration_21),
+    (22, migration_22),
 )
 
 

@@ -116,3 +116,51 @@ def test_coding_managed_worker_is_eligible_without_native_tool_calls(tmp_path: P
     decision=RoutingEngine(db).capability_selection('role-coding')
     assert decision['selected']['execution_plan']=='managed_coding_worker'
     db.close()
+
+
+def test_project_lead_managed_planning_is_cloud_only_without_native_tools(tmp_path: Path) -> None:
+    db=Database(tmp_path/'planning.db');db.open()
+    db.execute("INSERT INTO providers(id,name,adapter_type,health_status) VALUES('cloud','Cloud','mock','healthy'),('local','Local','mock','healthy')")
+    evidence='{"capability_evidence":{"chat":"verified","structured_output":"verified","managed_planning_worker":"verified"}}'
+    db.execute("INSERT INTO models(id,provider_id,name,status,locality,user_overrides_json) VALUES('cloud-model','cloud','cloud','available','remote',?),('local-model','local','local','available','local',?)",(evidence,evidence))
+    db.execute("INSERT INTO routes(id,name,role_id,priority,policy_json) VALUES('planning-route','Planning','role-project-lead',10,'{\"capability_routing\":{\"enforce\":true}}')")
+    db.execute("INSERT INTO route_targets(route_id,provider_id,model_id,ordinal,conditions_json) VALUES('planning-route','local','local-model',0,'{\"execution_plan\":\"managed_planning\"}'),('planning-route','cloud','cloud-model',1,'{\"execution_plan\":\"managed_planning\"}')")
+
+    decision=RoutingEngine(db).capability_selection('role-project-lead', execution_tier='cloud')
+
+    assert decision['selected']['model_id']=='cloud-model'
+    assert decision['requirements']['execution_capabilities_any']==['native_tool_calls','managed_planning_worker']
+    assert any(item['model_id']=='local-model' and item['reason']=='execution_tier_mismatch' for item in decision['excluded'])
+    db.close()
+
+
+def test_cloud_tier_rejects_unknown_locality_instead_of_falling_back(tmp_path: Path) -> None:
+    db=Database(tmp_path/'no-cloud.db');db.open()
+    db.execute("INSERT INTO providers(id,name,adapter_type,health_status) VALUES('p','P','mock','healthy')")
+    evidence='{"capability_evidence":{"chat":"verified","structured_output":"verified","managed_planning_worker":"verified"}}'
+    db.execute("INSERT INTO models(id,provider_id,name,status,locality,user_overrides_json) VALUES('m','p','unknown-locality','available',NULL,?)",(evidence,))
+    db.execute("INSERT INTO routes(id,name,role_id,priority,policy_json) VALUES('r','Planning','role-project-lead',10,'{\"capability_routing\":{\"enforce\":true}}')")
+    db.execute("INSERT INTO route_targets(route_id,provider_id,model_id,ordinal,conditions_json) VALUES('r','p','m',0,'{\"execution_plan\":\"managed_planning\"}')")
+
+    decision=RoutingEngine(db).capability_selection('role-project-lead', execution_tier='cloud')
+
+    assert decision['selected'] is None and decision['fallback_candidates']==[]
+    assert decision['excluded'][0]['reason']=='execution_tier_mismatch'
+    db.close()
+
+
+def test_locality_override_enables_cloud_selection_and_eligible_route_output(tmp_path: Path) -> None:
+    db=Database(tmp_path/'override-cloud.db');db.open()
+    db.execute("INSERT INTO providers(id,name,adapter_type,health_status) VALUES('p','P','mock','healthy')")
+    overrides='{"locality":"remote","capability_evidence":{"chat":"verified","structured_output":"verified","managed_planning_worker":"verified"}}'
+    db.execute("INSERT INTO models(id,provider_id,name,status,locality,user_overrides_json) VALUES('m','p','override-remote','available',NULL,?)",(overrides,))
+    db.execute("INSERT INTO routes(id,name,role_id,priority,policy_json) VALUES('r','Planning','role-project-lead',10,'{\"capability_routing\":{\"enforce\":true}}')")
+    db.execute("INSERT INTO route_targets(route_id,provider_id,model_id,ordinal,conditions_json) VALUES('r','p','m',0,'{\"execution_plan\":\"managed_planning\"}')")
+
+    engine=RoutingEngine(db)
+    decision=engine.capability_selection('role-project-lead', execution_tier='cloud')
+
+    assert decision['selected']['model_id']=='m'
+    assert decision['selected']['locality']=='remote'
+    assert engine.eligible_routes('role-project-lead')[0].locality=='remote'
+    db.close()

@@ -40,10 +40,53 @@ def test_hybrid_deterministic_rules_are_conservative(tmp_path):
  assert policy.deterministic('Plan a multi-step feature implementation and validation').role_id=='role-project-lead'
  assert policy.deterministic('Add a small improvements page to the WebUI that shows current environment health, add tests, and report what changed.').role_id=='role-project-lead'
  assert policy.deterministic('Inspect the WebUI health display, make one small clarity improvement, add a regression test, run the focused tests, and summarize the result.').role_id=='role-project-lead'
+ exact = policy.deterministic("Plan an upgrade of my Nextcloud environment including backup, validation, and rollback. Don't execute anything yet.")
+ assert exact.role_id == 'role-project-lead'
+ assert exact.reason_code == 'automatic_project_management'
+ assert exact.source == 'work-intake'
  assert policy.deterministic('Fix the source file parser').role_id=='role-coding'
  assert policy.deterministic('Restart the approved test VM').role_id=='role-infrastructure'
  assert policy.deterministic('Explain this architecture') is None
  assert policy.deterministic('What is Python?') is None
+ db.close()
+
+
+@pytest.mark.asyncio
+async def test_discord_structural_project_uses_named_pm_managed_planning_without_jobs(tmp_path):
+ db,svc,fake=setup(tmp_path)
+ request_text="Plan an upgrade of my Nextcloud environment including backup, validation, and rollback. Don't execute anything yet."
+ db.execute("UPDATE roles SET enabled=1 WHERE id='role-project-lead'")
+ db.execute("UPDATE providers SET health_status='healthy' WHERE id='p'")
+ evidence=json.dumps({"capability_evidence":{"chat":"verified","structured_output":"verified","managed_planning_worker":"verified"}})
+ db.execute("UPDATE models SET status='available', locality='remote', user_overrides_json=? WHERE id='m'",(evidence,))
+ db.execute("INSERT INTO workers(id,name,worker_type) VALUES('planner','Planner','managed_planning')")
+ db.execute("INSERT INTO environment_targets(id,name,target_type) VALUES('planning-env','Planning','workspace')")
+ policy=json.dumps({"capability_routing":{"enforce":True},"delegated_execution":{"worker_id":"planner","environment_id":"planning-env"}})
+ db.execute("INSERT INTO routes(id,name,role_id,priority,policy_json) VALUES('planning','Planning','role-project-lead',20,?)",(policy,))
+ db.execute("INSERT INTO route_targets(route_id,provider_id,model_id,ordinal,conditions_json) VALUES('planning','p','m',0,'{\"execution_plan\":\"managed_planning\"}')")
+
+ class PlanningLead:
+  def __init__(self): self.calls=[]
+  async def run(self,session_id,objective,selection,manager,user_id,interface_type):
+   self.calls.append((objective,selection,manager,interface_type))
+   return {"id":"project-nextcloud","status":"planned","plans":[{"plan":{"summary":"Safe upgrade proposal"}}]}
+
+ lead=PlanningLead();svc.project_lead=lead
+ reply=await DiscordAdapter(svc,SimpleNamespace()).handle_message('discord-user',request_text,session_key='phase2a')
+
+ assert reply.metadata['task_class']=='project_plan'
+ assert reply.metadata['job_created'] is False
+ assert 'Project Manager' in reply.content and 'No work has been executed' in reply.content
+ assert 'Medium route unavailable' not in reply.content
+ assert len(lead.calls)==1 and lead.calls[0][0]==request_text
+ selection,manager=lead.calls[0][1],lead.calls[0][2]
+ assert selection['execution_plan']=='managed_planning'
+ assert selection['routing_decision']['selected']['route_id']=='planning'
+ assert manager['name'] in {'Daniel','Rachel','Sarah'}
+ event=db.fetch_one("SELECT metadata_json FROM interface_events WHERE event_type='delegation_decision'")
+ assert json.loads(event['metadata_json'])['selected_role_id']=='role-project-lead'
+ assert db.fetch_one("SELECT COUNT(*) FROM jobs")[0]==0
+ assert not fake.requests
  db.close()
 
 @pytest.mark.asyncio
@@ -69,13 +112,19 @@ async def test_single_fallback_after_read_only_tool_execution(tmp_path):
  db.execute("INSERT INTO models(id,provider_id,name,status) VALUES('m2','p2','M2','available')")
  db.execute("INSERT INTO route_targets(route_id,provider_id,model_id,ordinal) VALUES('r','p2','m2',1)")
  class Fallback:
-  def __init__(self): self.requests=[]
+  def __init__(self,db): self.db=db;self.requests=[]
   async def delegate_agent(self, request):
    self.requests.append(request)
+   job_id = 'one' if len(self.requests)==1 else 'two'
+   self.db.execute(
+    "INSERT INTO messages(id,session_id,role,content,metadata_json) VALUES(?,?,'assistant',?,?)",
+    ('answer-' + job_id, request.session_id, 'failed' if job_id == 'one' else 'ok', json.dumps({'job_id':job_id})),
+   )
    if len(self.requests)==1: return {'id':'one','status':'failed','result_json':json.dumps({'trace':[{'operation':'inspect_file','status':'succeeded'}], 'error_summary':'Coding Agent returned malformed tool call'}), 'error_summary':'Coding Agent returned malformed tool call'}
    return {'id':'two','status':'succeeded','result_json':json.dumps({'output':{'final_summary':'ok'},'trace':[]}), 'result_summary':'ok','error_summary':None}
- svc.delegation=Fallback();req=InterfaceRequest('cli','fallback','inspect');_,response=await svc.delegate_for_session(req,'role-coding','inspect')
+ svc.delegation=Fallback(db);req=InterfaceRequest('cli','fallback','inspect');_,response=await svc.delegate_for_session(req,'role-coding','inspect')
  assert response.content=='ok' and len(svc.delegation.requests)==2 and svc.delegation.requests[1].context['routing_decision']['fallback_used'] is True and svc.delegation.requests[1].context['prior_read_evidence'][0]['operation']=='inspect_file'
+ assert [dict(row) for row in db.fetch_all("SELECT id,content FROM messages WHERE role='assistant'")] == [{'id':'answer-two','content':'ok'}]
  db.close()
 
 def test_natural_infrastructure_reads_route_without_catching_education(tmp_path):

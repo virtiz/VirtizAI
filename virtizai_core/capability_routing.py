@@ -23,7 +23,14 @@ ROLE_REQUIREMENTS = {
     # Coding may use either a native-tool model or a bounded managed worker.
     "role-coding": TaskRequirements(("coding",), ("local",), True, execution_capabilities=("native_tool_calls", "managed_coding_worker")),
     "role-infrastructure": TaskRequirements(("chat", "native_tool_calls")),
-    "role-project-lead": TaskRequirements(("chat", "native_tool_calls", "structured_output"), ("reasoning",)),
+    # Project planning may be performed either through native structured tools or
+    # by the bounded managed-planning worker.  Do not require native tools when
+    # the configured execution boundary provides the planning contract.
+    "role-project-lead": TaskRequirements(
+        ("chat", "structured_output"),
+        ("reasoning",),
+        execution_capabilities=("native_tool_calls", "managed_planning_worker"),
+    ),
 }
 
 def requirements_for(role_id: str) -> TaskRequirements:

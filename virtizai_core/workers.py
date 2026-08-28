@@ -4,12 +4,14 @@ import asyncio
 import json
 import os
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from .db import Database
+from .work_intake import WorkIntakeClassifier
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,11 @@ class TaskClassifier:
             return TaskClassification("hard", "capability or execution signal")
         if any(signal in text for signal in self.medium):
             return TaskClassification("medium", "reasoning or planning signal")
+        intake = WorkIntakeClassifier().classify(content)
+        if intake.intent in {"coding", "infrastructure", "operational", "project"}:
+            return TaskClassification("hard", intake.reason)
+        if intake.intent == "research":
+            return TaskClassification("medium", intake.reason)
         return TaskClassification("simple", "default conversational request")
 
 
@@ -220,6 +227,119 @@ class ManagedCodingWorkerExecutor:
             after = self._repo_state(workspace)
             state = "READ_ONLY" if not write_authorized and after == before else "SIDE_EFFECT_UNKNOWN"
             return ExecutionResult("failed", {"execution_plan":"managed_coding_worker","sandbox":sandbox,"before":before,"after":after,"side_effect_state":state}, "Managed coding worker timed out", (time.perf_counter()-started)*1000)
+
+
+class ManagedPlanningWorkerExecutor(ManagedCodingWorkerExecutor):
+    """Planning-only Codex CLI contract, distinct from managed coding."""
+
+    worker_type = "managed_planning"
+    MAX_PLAN_BYTES = 16_000
+
+    @staticmethod
+    def _output_schema() -> dict[str, Any]:
+        bounded_string = lambda maximum: {"type": "string", "minLength": 1, "maxLength": maximum, "pattern": r"\S"}
+        return {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["summary", "milestones"],
+            "properties": {
+                "summary": bounded_string(1000),
+                "milestones": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 6,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["title", "objective", "acceptance_criteria"],
+                        "properties": {
+                            "title": bounded_string(160),
+                            "objective": bounded_string(1200),
+                            "acceptance_criteria": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 6,
+                                "items": bounded_string(300),
+                            },
+                        },
+                    },
+                },
+            },
+        }
+
+    @classmethod
+    def _write_output_schema(cls) -> Path:
+        fd, name = tempfile.mkstemp(prefix="virtizai-planning-", suffix=".schema.json", dir="/tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as schema_file:
+                json.dump(cls._output_schema(), schema_file, separators=(",", ":"))
+        except Exception:
+            Path(name).unlink(missing_ok=True)
+            raise
+        return Path(name)
+
+    @staticmethod
+    def _read_only_state(workspace: Path) -> dict[str, Any]:
+        import subprocess
+        try:
+            status = subprocess.run(("git", "status", "--porcelain=v1"), cwd=workspace, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=False).stdout
+        except Exception:
+            status = "__state_unavailable__"
+        return {"status": status[:8000]}
+
+    @staticmethod
+    def _agent_text(jsonl: str) -> str:
+        messages = []
+        for line in jsonl.splitlines():
+            try: event = json.loads(line)
+            except json.JSONDecodeError: continue
+            item = event.get("item") if isinstance(event, dict) else None
+            if isinstance(item, dict) and item.get("type") == "agent_message" and isinstance(item.get("text"), str): messages.append(item["text"])
+        return messages[-1].strip() if messages else ""
+
+    @classmethod
+    def _validate_plan(cls, value: Any) -> dict:
+        if not isinstance(value, dict) or set(value) != {"summary", "milestones"}: raise WorkerExecutionError("Managed planning returned invalid JSON plan")
+        if not isinstance(value["summary"], str) or not value["summary"].strip() or len(value["summary"]) > 1000: raise WorkerExecutionError("Managed planning returned invalid JSON plan")
+        milestones = value["milestones"]
+        if not isinstance(milestones, list) or not 1 <= len(milestones) <= 6: raise WorkerExecutionError("Managed planning returned invalid JSON plan")
+        for item in milestones:
+            if not isinstance(item, dict) or set(item) != {"title", "objective", "acceptance_criteria"}: raise WorkerExecutionError("Managed planning returned invalid JSON plan")
+            if not isinstance(item["title"], str) or not item["title"].strip() or len(item["title"]) > 160: raise WorkerExecutionError("Managed planning returned invalid JSON plan")
+            if not isinstance(item["objective"], str) or not item["objective"].strip() or len(item["objective"]) > 1200: raise WorkerExecutionError("Managed planning returned invalid JSON plan")
+            criteria = item["acceptance_criteria"]
+            if not isinstance(criteria, list) or not 1 <= len(criteria) <= 6 or not all(isinstance(x, str) and x.strip() and len(x) <= 300 for x in criteria): raise WorkerExecutionError("Managed planning returned invalid JSON plan")
+        return value
+
+    async def execute(self, request: ExecutionRequest, worker: dict, environment: dict) -> ExecutionResult:
+        if request.operation != "managed_planning" or request.payload.get("role_id") != "role-project-lead": return ExecutionResult("failed", error_summary="Managed planning is limited to role-project-lead")
+        objective = str(request.payload.get("objective", "")).strip()[:3000]
+        if not objective: return ExecutionResult("failed", error_summary="Managed planning objective is empty")
+        workspace = self._workspace(environment); before = self._read_only_state(workspace)
+        try: config = json.loads(worker.get("config_json") or "{}")
+        except json.JSONDecodeError: config = {}
+        executable = config.get("executable", "codex")
+        if not isinstance(executable, str) or not executable or (shutil.which(executable) is None and not Path(executable).exists()): return ExecutionResult("failed", {"before":before}, "Managed planning worker is unavailable")
+        prompt = "Inspect only as needed. Do not edit or execute the plan. Return only JSON with exactly summary and milestones; include 1-6 milestones, and each milestone has exactly title, objective, acceptance_criteria. Objective:\n" + objective
+        timeout = min(float(request.timeout_seconds or config.get("timeout_seconds", 120)), 300)
+        started = time.perf_counter(); process = None; schema_path = None
+        try:
+            schema_path = self._write_output_schema()
+            argv = [executable, "exec", "--json", "--output-schema", str(schema_path), "--ephemeral", "-C", str(workspace), "--sandbox", "read-only", prompt]
+            process = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout); after = self._read_only_state(workspace)
+            if process.returncode != 0: return ExecutionResult("failed", {"before":before,"after":after}, "Managed planning worker failed", (time.perf_counter()-started)*1000)
+            if after != before: return ExecutionResult("failed", {"before":before,"after":after}, "Read-only managed planning changed workspace", (time.perf_counter()-started)*1000)
+            raw = self._agent_text(stdout.decode(errors="replace"))
+            if len(raw.encode()) > self.MAX_PLAN_BYTES: raise WorkerExecutionError("Managed planning JSON exceeded output limit")
+            plan = self._validate_plan(json.loads(raw))
+            return ExecutionResult("succeeded", {"execution_plan":"managed_planning","sandbox":"read-only","plan":plan,"files_changed":[]}, duration_ms=(time.perf_counter()-started)*1000)
+        except (asyncio.TimeoutError, json.JSONDecodeError, WorkerExecutionError) as exc:
+            if process and process.returncode is None: process.kill(); await process.communicate()
+            return ExecutionResult("failed", {"before":before,"after":self._read_only_state(workspace),"sandbox":"read-only"}, str(exc) or "Managed planning failed", (time.perf_counter()-started)*1000)
+        finally:
+            if schema_path is not None:
+                schema_path.unlink(missing_ok=True)
 
 
 class CodexWorker:

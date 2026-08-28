@@ -12,6 +12,7 @@ from virtizai_core.api import create_app
 from virtizai_core.config import AppConfig
 from virtizai_core.db import Database
 from virtizai_core.jobs import JobManager
+from virtizai_core.migrations import MIGRATIONS
 from virtizai_core.secrets import EnvironmentSecretStore, MemorySecretStore
 from virtizai_core.providers import ProviderRegistry
 from virtizai_core.services import CoreService
@@ -34,7 +35,7 @@ async def test_health_schema_and_restart_preserve_state(tmp_path: Path) -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         health = await client.get("/healthz")
         assert health.status_code == 200
-        assert health.json()["schema_version"] == 19
+        assert health.json()["schema_version"] == MIGRATIONS[-1][0]
         assert (await client.get("/")).status_code == 200
         assert (await client.get("/static/styles.css")).status_code == 200
         created = await client.post("/v1/sessions", json={"user_id": "user-1"})
@@ -60,12 +61,12 @@ def test_wal_and_migrations_are_versioned(tmp_path: Path) -> None:
     database.open()
     journal_mode = database.fetch_one("PRAGMA journal_mode")[0]
     assert journal_mode.lower() == "wal"
-    assert database.fetch_one("SELECT MAX(version) FROM schema_migrations")[0] == 19
+    assert database.fetch_one("SELECT MAX(version) FROM schema_migrations")[0] == MIGRATIONS[-1][0]
     database.close()
 
     reopened = Database(tmp_path / "state.db")
     reopened.open()
-    assert reopened.fetch_one("SELECT COUNT(*) FROM schema_migrations")[0] == 19
+    assert reopened.fetch_one("SELECT COUNT(*) FROM schema_migrations")[0] == len(MIGRATIONS)
     reopened.close()
 
 

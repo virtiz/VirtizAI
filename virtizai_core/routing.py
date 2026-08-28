@@ -69,6 +69,18 @@ STRATEGIES: dict[str, RoutingStrategy] = {
 }
 
 
+def effective_locality(row: dict) -> str | None:
+    locality = row.get("locality")
+    if locality in {"local", "remote"}:
+        return locality
+    try:
+        overrides = json.loads(row.get("user_overrides_json") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    override = overrides.get("locality") if isinstance(overrides, dict) else None
+    return override if override in {"local", "remote"} else None
+
+
 class RoutingEngine:
     def __init__(self, database: Database) -> None:
         self.database = database
@@ -85,7 +97,7 @@ class RoutingEngine:
                    p.name AS provider_name, p.health_status AS provider_status,
                    m.name AS model_name, m.status AS model_status,
                    m.expected_latency_ms, m.first_token_latency_ms,
-                   m.relative_cost, m.locality
+                   m.relative_cost, m.locality, m.user_overrides_json
             FROM routes r
             JOIN route_targets rt ON rt.route_id = r.id AND rt.enabled = 1
             JOIN providers p ON p.id = rt.provider_id AND p.enabled = 1
@@ -107,7 +119,7 @@ class RoutingEngine:
                 model_name=row["model_name"], provider_name=row["provider_name"], priority=row["priority"],
                 ordinal=row["ordinal"], expected_latency_ms=row["expected_latency_ms"],
                 first_token_latency_ms=row["first_token_latency_ms"], relative_cost=row["relative_cost"],
-                locality=row["locality"], same_provider_fallback=same_provider,
+                locality=effective_locality(dict(row)), same_provider_fallback=same_provider,
             ))
         return STRATEGIES.get(strategy, STRATEGIES["priority"]).order(routes)
 
@@ -124,11 +136,12 @@ class RoutingEngine:
         eligible, excluded = [], []
         for raw in rows[:32]:
             row = dict(raw); reason = None
+            locality = effective_locality(row)
             try: policy = json.loads(row.get("policy_json") or "{}")
             except json.JSONDecodeError: policy = {}
             enforce = bool(isinstance(policy, dict) and isinstance(policy.get("capability_routing"), dict) and policy["capability_routing"].get("enforce", True))
-            if execution_tier == "local" and row["locality"] != "local": reason = "execution_tier_mismatch"
-            elif execution_tier == "cloud" and row["locality"] == "local": reason = "execution_tier_mismatch"
+            if execution_tier == "local" and locality != "local": reason = "execution_tier_mismatch"
+            elif execution_tier == "cloud" and locality != "remote": reason = "execution_tier_mismatch"
             elif not row["target_enabled"]: reason = "route_target_disabled"
             elif not row["provider_enabled"]: reason = "provider_disabled"
             elif enforce and row["health_status"] not in {"healthy", "degraded"}: reason = "provider_unhealthy"
@@ -144,7 +157,7 @@ class RoutingEngine:
             try: conditions = json.loads(row.get("conditions_json") or "{}")
             except json.JSONDecodeError: conditions = {}
             plan = conditions.get("execution_plan", "native_tool_coding") if isinstance(conditions, dict) else "native_tool_coding"
-            entry = {"route_id":row["route_id"],"provider_id":row["provider_id"],"model_id":row["model_id"],"ordinal":row["ordinal"],"priority":row["priority"],"locality":row["locality"],"latency":row["first_token_latency_ms"] or row["expected_latency_ms"],"cost":row["relative_cost"],"capability_enforced":enforce,"execution_plan":plan,"worker_id":conditions.get("worker_id") if isinstance(conditions, dict) else None,"environment_id":conditions.get("environment_id") if isinstance(conditions, dict) else None}
+            entry = {"route_id":row["route_id"],"provider_id":row["provider_id"],"model_id":row["model_id"],"ordinal":row["ordinal"],"priority":row["priority"],"locality":locality,"latency":row["first_token_latency_ms"] or row["expected_latency_ms"],"cost":row["relative_cost"],"capability_enforced":enforce,"execution_plan":plan,"worker_id":conditions.get("worker_id") if isinstance(conditions, dict) else None,"environment_id":conditions.get("environment_id") if isinstance(conditions, dict) else None}
             if reason: excluded.append({**entry,"reason":reason}); continue
             eligible.append(entry)
         eligible.sort(key=lambda item: (item["priority"], 0 if requirements.prefer_local and item["locality"] == "local" else 1, item["latency"] if requirements.latency_preference == "low" and item["latency"] is not None else 1e12, item["cost"] if requirements.cost_preference == "low" and item["cost"] is not None else 1e12, item["ordinal"], item["provider_id"], item["model_id"]))
